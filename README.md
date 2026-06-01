@@ -126,4 +126,4 @@ PDFのテキストスパンと正確な座標を抽出 → 翻訳APIを呼び出
 
 ## License
 
-MIT
+MIT - Copyright (c) 2026 [银桑](https://github.com/yinsang0910-star)
