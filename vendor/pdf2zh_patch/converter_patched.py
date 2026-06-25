@@ -251,10 +251,18 @@ class TranslateConverter(PDFConverterEx):
                 # 锚定文档中 bullet 的位置
                 if child.get_text() == "•":
                     cls = 0
+                # PATCH: 角标判定(规则2)不应作用于 CJK 表意文字。中文几乎没有数学角标，
+                # 而一旦段落字号被装饰性大号标点(如放大的引号「」)抬高，正文 CJK 就会
+                # 因 size < 段落size*0.79 被误判为角标/公式而漏译。
+                _ctext = child.get_text()
+                _is_cjk = bool(_ctext) and (
+                    "㐀" <= _ctext[0] <= "鿿"      # CJK 统一表意文字
+                    or "豈" <= _ctext[0] <= "﫿"   # CJK 兼容表意文字
+                )
                 # 判定当前字符是否属于公式
                 if (                                                                                        # 判定当前字符是否属于公式
                     cls == 0                                                                                # 1. 类别为保留区域
-                    or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79)  # 2. 角标字体，有 0.76 的角标和 0.799 的大写，这里用 0.79 取中，同时考虑首字母放大的情况
+                    or (cls == xt_cls and len(sstk[-1].strip()) > 1 and child.size < pstk[-1].size * 0.79 and not _is_cjk)  # 2. 角标字体(CJK 文字除外)
                     or vflag(child.fontname, child.get_text())                                              # 3. 公式字体
                     or (child.matrix[0] == 0 and child.matrix[3] == 0)                                      # 4. 垂直字体
                 ):
@@ -325,13 +333,19 @@ class TranslateConverter(PDFConverterEx):
                         _para.in_figure = in_figure  # PATCH#2 标记图表区域段落
                         pstk.append(_para)
                 if not cur_v:                                               # 文字入栈
+                    # PATCH: 装饰性大号标点（如放大的引号「」）不应抬高段落字号，否则
+                    # 后续正文会因 size < 段落size*0.79 被误判为角标/公式而漏译。
+                    _ct = child.get_text()
+                    _is_punct = bool(_ct) and unicodedata.category(_ct[0]) in (
+                        "Ps", "Pe", "Pi", "Pf", "Po"  # 各类标点
+                    )
                     if (                                                    # 根据当前字符修正段落属性
                         child.size > pstk[-1].size                          # 1. 当前字符比段落字体大
                         or len(sstk[-1].strip()) == 1                       # 2. 当前字符为段落第二个文字（考虑首字母放大的情况）
-                    ) and child.get_text() != " ":                          # 3. 当前字符不是空格
+                    ) and _ct != " " and not _is_punct:                     # 3. 不是空格，也不是装饰性标点
                         pstk[-1].y -= child.size - pstk[-1].size            # 修正段落初始纵坐标，假设两个不同大小字符的上边界对齐
                         pstk[-1].size = child.size
-                    sstk[-1] += child.get_text()
+                    sstk[-1] += _ct
                 else:                                                       # 公式入栈
                     if (                                                    # 根据公式左侧的文字修正公式的纵向偏移
                         not vstk                                            # 1. 当前字符是公式的第一个字符
