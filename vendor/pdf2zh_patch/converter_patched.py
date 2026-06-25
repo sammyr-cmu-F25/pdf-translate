@@ -44,6 +44,25 @@ from pdf2zh.translator import (
 log = logging.getLogger(__name__)
 
 
+def _char_is_cjk(ch: str) -> bool:
+    """True for CJK text characters, broadly defined. Includes Kangxi radicals
+    (U+2F00-U+2FDF) and CJK radicals supplement (U+2E80-U+2EFF) because some
+    source PDFs encode real Chinese characters with those codepoints, plus CJK
+    punctuation and full-width forms. Used to keep CJK body text from being
+    misclassified as math subscripts/formulas (and thus left untranslated)."""
+    if not ch:
+        return False
+    o = ord(ch)
+    return (
+        0x3400 <= o <= 0x9FFF        # CJK Unified Ideographs (+ Ext A)
+        or 0xF900 <= o <= 0xFAFF     # CJK Compatibility Ideographs
+        or 0x2E80 <= o <= 0x2FDF     # CJK Radicals Supplement + Kangxi Radicals
+        or 0x3000 <= o <= 0x303F     # CJK Symbols and Punctuation
+        or 0xFF00 <= o <= 0xFFEF     # Halfwidth/Fullwidth Forms (，。 etc.)
+        or 0x20000 <= o <= 0x2A6DF   # CJK Unified Ideographs Ext B
+    )
+
+
 class PDFConverterEx(PDFConverter):
     def __init__(
         self,
@@ -255,10 +274,7 @@ class TranslateConverter(PDFConverterEx):
                 # 而一旦段落字号被装饰性大号标点(如放大的引号「」)抬高，正文 CJK 就会
                 # 因 size < 段落size*0.79 被误判为角标/公式而漏译。
                 _ctext = child.get_text()
-                _is_cjk = bool(_ctext) and (
-                    "㐀" <= _ctext[0] <= "鿿"      # CJK 统一表意文字
-                    or "豈" <= _ctext[0] <= "﫿"   # CJK 兼容表意文字
-                )
+                _is_cjk = bool(_ctext) and _char_is_cjk(_ctext[0])
                 # 判定当前字符是否属于公式
                 if (                                                                                        # 判定当前字符是否属于公式
                     cls == 0                                                                                # 1. 类别为保留区域
