@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PDF 翻译工具 — 基于 pdf2zh (PDFMathTranslate)
-保留原始排版、图形、表格，仅替换文本为目标语言
+PDF 翻译工具 — 基于 pdf2zh (PDFMathTranslate)，并加载本仓库的增强补丁。
+
+保留原始排版、图形、表格，仅替换文本为目标语言。相比上游 pdf2zh 额外支持：
+    PATCH#1  译文颜色与原文一致（修复白色标题翻译后变黑看不清的问题）
+    PATCH#3  译文过长时自动缩小字号以塞进标题 / 表格单元格（避免溢出）
 
 用法:
-    python pdf-translate.py input.pdf                    # 默认英文→中文
-    python pdf-translate.py input.pdf -li ja -lo zh      # 日文→中文
-    python pdf-translate.py input.pdf --service deepl     # 指定翻译服务
+    python pdf-translate.py input.pdf                       # 默认英文→中文
+    python pdf-translate.py input.pdf -li ja -lo zh         # 日文→中文
+    python pdf-translate.py input.pdf -li zh -lo en         # 中文→英文
+    python pdf-translate.py input.pdf --service openai      # 指定翻译服务
+    python pdf-translate.py input.pdf -o /path/to/outdir    # 指定输出目录
 
 依赖:
-    Python 3.10+
+    Python 3.10–3.12（注意：3.13 上 pdf2zh 不兼容）
     pip install pdf2zh
 
 输出:
@@ -18,96 +23,71 @@ PDF 翻译工具 — 基于 pdf2zh (PDFMathTranslate)
     input-dual.pdf  — 双语对照版
 """
 
-import subprocess
-import sys
+import argparse
 import os
-import shutil
+import sys
+
+# 让 vendor/ 下的补丁可被导入
+_REPO = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_REPO, "vendor"))
 
 
-def find_pdf2zh():
-    """查找 pdf2zh 可执行文件路径"""
-    # 优先查找 PATH 中的 pdf2zh
-    pdf2zh = shutil.which("pdf2zh")
-    if pdf2zh:
-        return pdf2zh
+def main():
+    os.environ.setdefault("PYTHONUTF8", "1")
 
-    # 查找 Scripts/bin 目录下的 pdf2zh.exe
-    python_dir = os.path.dirname(sys.executable)
-    for subdir in ("Scripts", "bin"):
-        candidate = os.path.join(python_dir, subdir, "pdf2zh.exe")
-        if os.path.isfile(candidate):
-            return candidate
-        candidate = os.path.join(python_dir, subdir, "pdf2zh")
-        if os.path.isfile(candidate):
-            return candidate
+    parser = argparse.ArgumentParser(description="Translate a PDF while preserving layout (patched pdf2zh).")
+    parser.add_argument("input", help="Path to the input PDF")
+    parser.add_argument("-li", "--lang-in", default="en", help="Source language code (default: en)")
+    parser.add_argument("-lo", "--lang-out", default="zh", help="Target language code (default: zh)")
+    parser.add_argument("-s", "--service", default="google", help="Translation service (default: google)")
+    parser.add_argument("-o", "--output", default="", help="Output directory (default: alongside input)")
+    parser.add_argument("-t", "--thread", type=int, default=4, help="Worker threads (default: 4)")
+    parser.add_argument("--no-patch", action="store_true", help="Disable enhancement patches (use stock pdf2zh)")
+    parser.add_argument("--protect-figures", action="store_true",
+                        help="Do NOT translate text inside figures/tables (restore stock pdf2zh behavior). "
+                             "By default this tool translates that text too (math formulas always preserved).")
+    args = parser.parse_args()
 
-    # 兜底：用 python -m pdf2zh
-    return None
+    if not os.path.exists(args.input):
+        print(f"❌ 文件不存在: {args.input}")
+        return 1
 
+    # 应用补丁（必须在 high_level 构建 converter 之前）
+    if not args.no_patch:
+        import pdf2zh_patch
+        translate_figures = not args.protect_figures
+        pdf2zh_patch.patch(translate_figures=translate_figures)
+        extra = "" if not translate_figures else " + 翻译图表内文字(#2)"
+        print(f"🩹 已加载增强补丁: 颜色匹配(#1) + 自适应字号(#3){extra}")
 
-def translate_pdf(input_pdf, lang_in="en", lang_out="zh", service="google"):
-    """翻译 PDF 并保留原始排版"""
-    if not os.path.exists(input_pdf):
-        print(f"❌ 文件不存在: {input_pdf}")
-        return None
+    import pdf2zh.high_level as hl
+    from pdf2zh.doclayout import OnnxModel
 
-    pdf2zh_cmd = find_pdf2zh()
-    if pdf2zh_cmd:
-        cmd = [pdf2zh_cmd, input_pdf, "-li", lang_in, "-lo", lang_out, "--service", service]
-    else:
-        cmd = [sys.executable, "-m", "pdf2zh", input_pdf, "-li", lang_in, "-lo", lang_out, "--service", service]
+    output_dir = args.output or os.path.dirname(os.path.abspath(args.input))
+    os.makedirs(output_dir, exist_ok=True)
 
-    env = os.environ.copy()
-    env["PYTHONUTF8"] = "1"
+    print(f"🔄 翻译中: {os.path.basename(args.input)}")
+    print(f"   {args.lang_in} → {args.lang_out} (服务: {args.service})")
 
-    print(f"🔄 翻译中: {os.path.basename(input_pdf)}")
-    print(f"   {lang_in} → {lang_out} (服务: {service})")
+    hl.translate(
+        files=[args.input],
+        output=output_dir,
+        lang_in=args.lang_in,
+        lang_out=args.lang_out,
+        service=args.service,
+        thread=args.thread,
+        model=OnnxModel.load_available(),
+    )
 
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", env=env)
+    base = os.path.splitext(os.path.basename(args.input))[0]
+    for suffix, label in (("mono", "纯翻译版"), ("dual", "双语对照版")):
+        path = os.path.join(output_dir, f"{base}-{suffix}.pdf")
+        if os.path.exists(path):
+            size = os.path.getsize(path) // 1024
+            print(f"✅ {label}: {path} ({size} KB)")
 
-    if result.returncode != 0:
-        print(f"❌ 翻译失败:\n{result.stderr}")
-        return None
-
-    # 确定输出文件名
-    base = os.path.splitext(input_pdf)[0]
-    mono = f"{base}-mono.pdf"
-    dual = f"{base}-dual.pdf"
-
-    outputs = {}
-    if os.path.exists(mono):
-        size = os.path.getsize(mono) // 1024
-        print(f"✅ 纯翻译版: {mono} ({size} KB)")
-        outputs["mono"] = mono
-    if os.path.exists(dual):
-        size = os.path.getsize(dual) // 1024
-        print(f"✅ 双语对照版: {dual} ({size} KB)")
-        outputs["dual"] = dual
-
-    return outputs
+    return 0
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("用法: python pdf-translate.py <input.pdf> [-li en] [-lo zh] [--service google]")
-        sys.exit(1)
-
-    input_file = sys.argv[1]
-
-    lang_in = "en"
-    lang_out = "zh"
-    service = "google"
-
-    args = sys.argv[2:]
-    i = 0
-    while i < len(args):
-        if args[i] == "-li" and i + 1 < len(args):
-            lang_in = args[i + 1]; i += 2
-        elif args[i] == "-lo" and i + 1 < len(args):
-            lang_out = args[i + 1]; i += 2
-        elif args[i] == "--service" and i + 1 < len(args):
-            service = args[i + 1]; i += 2
-        else:
-            i += 1
-
-    translate_pdf(input_file, lang_in, lang_out, service)
+    sys.exit(main())
