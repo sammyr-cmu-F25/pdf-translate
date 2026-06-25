@@ -555,6 +555,60 @@ class TranslateConverter(PDFConverterEx):
                     floor = 0.25 if in_fig else 0.5  # 图表标签允许缩到 25%
                     size = max(size * floor, size * scale)
 
+            # PATCH#4 单词级换行：对含空格的(拉丁)译文，预先在空格处计算换行点，
+            # 使其按单词边界换行，而不是在单词中间硬切（如 "p / ositive"）。
+            # 仅当段落需要换行(brk)、宽度有限、且文本含空格(说明是拉丁文)时启用。
+            wrap_breaks = set()
+            if brk and (x1 - x0) > 1 and " " in new.strip():
+                avail = x1 - x0
+                line_w = 0.0
+                last_space_ptr = None
+                seg_w_since_space = 0.0  # 自上个空格以来的宽度
+                i = 0
+                while i < len(new):
+                    # {vN} 公式记号作为一个不可断开的整体，按其已知宽度计
+                    vm = re.match(r"\{\s*v([\d\s]+)\}", new[i:], re.IGNORECASE)
+                    if vm:
+                        try:
+                            cw = vlen[int(vm.group(1).replace(" ", ""))]
+                        except Exception:
+                            cw = 0.0
+                        if line_w + cw > avail and last_space_ptr is not None:
+                            wrap_breaks.add(last_space_ptr)
+                            line_w = seg_w_since_space + cw
+                            last_space_ptr = None
+                        else:
+                            line_w += cw
+                        seg_w_since_space += cw
+                        i += len(vm.group(0))
+                        continue
+                    cc = new[i]
+                    f2 = None
+                    try:
+                        if self.fontmap["tiro"].to_unichr(ord(cc)) == cc:
+                            f2 = "tiro"
+                    except Exception:
+                        pass
+                    if f2 is None:
+                        f2 = self.noto_name
+                    if f2 == self.noto_name:
+                        cw = self.noto.char_lengths(cc, size)[0]
+                    else:
+                        cw = self.fontmap[f2].char_width(ord(cc)) * size
+                    if cc == " ":
+                        last_space_ptr = i
+                        seg_w_since_space = 0.0
+                    else:
+                        seg_w_since_space += cw
+                    if line_w + cw > avail and last_space_ptr is not None:
+                        # 在最近的空格处换行
+                        wrap_breaks.add(last_space_ptr)
+                        line_w = seg_w_since_space  # 新行从该单词开始
+                        last_space_ptr = None
+                    else:
+                        line_w += cw
+                    i += 1
+
             cstk: str = ""                              # 当前文字栈
             fcur: str = None                            # 当前字体 ID
             lidx = 0                                    # 记录换行次数
@@ -594,10 +648,17 @@ class TranslateConverter(PDFConverterEx):
                     else:
                         adv = self.fontmap[fcur_].char_width(ord(ch)) * size
                     ptr += 1
+                # PATCH#4 单词级换行模式：在预计算的空格位置换行；否则沿用按宽度换行
+                word_wrap = bool(wrap_breaks)
+                ptr_at_char = ptr - 1 if not vy_regex else ptr  # 当前字符在 new 中的索引
+                hit_word_break = word_wrap and (ptr_at_char in wrap_breaks)
+                hit_edge = (not word_wrap) and (x + adv > x1 + 0.1 * size)
+
                 if (                                # 输出文字缓冲区
                     fcur_ != fcur                   # 1. 字体更新
                     or vy_regex                     # 2. 插入公式
-                    or x + adv > x1 + 0.1 * size    # 3. 到达右边界（可能一整行都被符号化，这里需要考虑浮点误差）
+                    or hit_edge                     # 3. 到达右边界
+                    or hit_word_break               # 4. 单词边界换行点
                 ):
                     if cstk:
                         ops_vals.append({
@@ -610,7 +671,7 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx
                         })
                         cstk = ""
-                if brk and x + adv > x1 + 0.1 * size:  # 到达右边界且原文段落存在换行
+                if brk and (hit_edge or hit_word_break):  # 到达换行点且原文段落存在换行
                     x = x0
                     lidx += 1
                 if vy_regex:  # 插入公式
