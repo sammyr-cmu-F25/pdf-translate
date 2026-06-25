@@ -145,6 +145,7 @@ class Paragraph:
         self.brk: bool = brk  # 换行标记
         self.color = color  # PATCH#1 原文填充颜色 (graphicstate.ncolor)
         self.in_figure: bool = False  # PATCH#2 是否位于图表/表格区域(标签需更激进地缩放以塞进方框)
+        self.region: int = -1  # PATCH#5 所属 layout 区域 id(用于同一表格内字号统一)
 
 
 # fmt: off
@@ -347,6 +348,7 @@ class TranslateConverter(PDFConverterEx):
                             _color = None
                         _para = Paragraph(child.y0, child.x0, child.x0, child.x0, child.y0, child.y1, child.size, False, color=_color)
                         _para.in_figure = in_figure  # PATCH#2 标记图表区域段落
+                        _para.region = int(cls) if in_figure else -1  # PATCH#5 记录图表/表格区域 id
                         pstk.append(_para)
                 if not cur_v:                                               # 文字入栈
                     # PATCH: 装饰性大号标点（如放大的引号「」）不应抬高段落字号，否则
@@ -472,6 +474,61 @@ class TranslateConverter(PDFConverterEx):
         def gen_op_line(x, y, xlen, ylen, linewidth):
             return f"ET q 1 0 0 1 {x:f} {y:f} cm [] 0 d 0 J {linewidth:f} w 0 0 m {xlen:f} {ylen:f} l S Q BT "
 
+        # 通用文字宽度测量（供缩放与单词换行预计算复用）
+        def _measure_width_g(s: str, sz: float) -> float:
+            w = 0.0
+            p = 0
+            while p < len(s):
+                mm = re.match(r"\{\s*v([\d\s]+)\}", s[p:], re.IGNORECASE)
+                if mm:
+                    p += len(mm.group(0))
+                    try:
+                        w += vlen[int(mm.group(1).replace(" ", ""))]
+                    except Exception:
+                        pass
+                    continue
+                c = s[p]; p += 1
+                f_ = None
+                try:
+                    if self.fontmap["tiro"].to_unichr(ord(c)) == c:
+                        f_ = "tiro"
+                except Exception:
+                    pass
+                if f_ is None:
+                    f_ = self.noto_name
+                if f_ == self.noto_name:
+                    w += self.noto.char_lengths(c, sz)[0]
+                else:
+                    w += self.fontmap[f_].char_width(ord(c)) * sz
+            return w
+
+        # PATCH#5 预计算每段缩放后字号，并按 layout 区域(表格/图表)取最小值统一，
+        # 避免同一表格内各单元格字号忽大忽小。
+        def _shrunk_size(idx):
+            p = pstk[idx]
+            sz = p.size
+            bw = p.x1 - p.x0
+            if p.in_figure and self.box_oracle is not None:
+                try:
+                    rw = self.box_oracle(ltpage.pageid, p.x0, p.y0, p.x1, p.y1)
+                except Exception:
+                    rw = None
+                if rw and rw > 1:
+                    bw = rw * 0.92
+            if bw > 1 and (not p.brk or p.in_figure):
+                nat = _measure_width_g(news[idx], sz)
+                if nat > bw + 0.1 * sz:
+                    floor = 0.25 if p.in_figure else 0.5
+                    sz = max(sz * floor, sz * (bw / nat))
+            return sz
+
+        _region_min = {}
+        for _i in range(len(news)):
+            _r = pstk[_i].region
+            if _r >= 0:
+                _s = _shrunk_size(_i)
+                _region_min[_r] = min(_region_min.get(_r, _s), _s)
+
         for id, new in enumerate(news):
             x: float = pstk[id].x                       # 段落初始横坐标
             y: float = pstk[id].y                       # 段落初始纵坐标
@@ -538,22 +595,13 @@ class TranslateConverter(PDFConverterEx):
                 return w
 
             in_fig = pstk[id].in_figure
-            box_w = x1 - x0
-            # 图表标签：查询真实方框宽度(box_oracle)，按方框宽度精确缩放，避免溢出。
-            # 找不到方框时退回到原文文字宽度。允许更激进地缩小，因为译文常更长。
-            if in_fig and self.box_oracle is not None:
-                try:
-                    real_w = self.box_oracle(ltpage.pageid, pstk[id].x0, pstk[id].y0, pstk[id].x1, pstk[id].y1)
-                except Exception:
-                    real_w = None
-                if real_w and real_w > 1:
-                    box_w = real_w * 0.92  # 方框内留少量边距
-            if box_w > 1 and (not brk or in_fig):
-                natural_w = _measure_width(new, size)
-                if natural_w > box_w + 0.1 * size:
-                    scale = box_w / natural_w
-                    floor = 0.25 if in_fig else 0.5  # 图表标签允许缩到 25%
-                    size = max(size * floor, size * scale)
+            # PATCH#5 表格/图表区域：使用区域内统一(最小)字号，保证同表格字号一致。
+            # 其它段落：按自身缩放。
+            _reg = pstk[id].region
+            if _reg >= 0 and _reg in _region_min:
+                size = _region_min[_reg]
+            else:
+                size = _shrunk_size(id)
 
             # PATCH#4 单词级换行：对含空格的(拉丁)译文，预先在空格处计算换行点，
             # 使其按单词边界换行，而不是在单词中间硬切（如 "p / ositive"）。
