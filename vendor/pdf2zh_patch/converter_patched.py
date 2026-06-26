@@ -589,6 +589,57 @@ class TranslateConverter(PDFConverterEx):
                     seg += cw
             return lines
 
+        # PATCH#6b 段落右侧可用宽度：到同一行右侧最近段落左边界的距离。用于防止某段
+        # 因译文变宽而水平压到同一行右侧的另一段(如图注与标题在同一行重叠)。
+        def _avail_width_right(idx):
+            p = pstk[idx]
+            best = None
+            for j in range(len(pstk)):
+                if j == idx:
+                    continue
+                q = pstk[j]
+                # 垂直方向有重叠(同一行)
+                y_overlap = min(p.y1, q.y1) - max(p.y0, q.y0)
+                if y_overlap <= 2:
+                    continue
+                # q 的左边界在 p 的起点右侧(含交错重叠的情况)，且 q 不是被 p 完全包含
+                if q.x0 > p.x0 + 1 and q.x1 > p.x1:
+                    gap = q.x0 - p.x0
+                    if best is None or gap < best:
+                        best = gap
+            return best
+
+        # PATCH#6c 判断某段是否为"被错位的小图注"——与同一行另一段(字号更大、如标题)
+        # 严重重叠，且无横向空间安放。这类文字通常是图表内部标签被误放入正文流，
+        # 直接抑制不渲染，避免压在标题上(重叠严禁)。
+        def _is_stray_overlapping_caption(idx, render_size):
+            # 错位的图表标签特征：原文 pstk 包围盒"竖高窄"(高 >> 宽，常是被误抽的竖排/
+            # 单列标签)，但译文会从 x0 起横向铺开，渲染后压到同一行字号更大的标题/正文上。
+            p = pstk[idx]
+            p_box_w = max(p.x1 - p.x0, 1.0)
+            p_box_h = p.y1 - p.y0
+            # 只针对"竖高窄"的可疑标签(高至少是宽的 2 倍)，避免误伤正常段落
+            if p_box_h < 2.0 * p_box_w:
+                return False
+            # 渲染后的横向范围(从 x0 起，按译文宽度)
+            p_x1 = p.x0 + _measure_width_g(news[idx], render_size)
+            p_render_w = p_x1 - p.x0
+            for j in range(len(pstk)):
+                if j == idx:
+                    continue
+                q = pstk[j]
+                if q.size < p.size * 1.15:        # 仅当对方字号更大(标题/正文)
+                    continue
+                q_x1 = q.x0 + _measure_width_g(news[j], q.size)
+                # 两段基线非常接近(同一行附近，容差取较大字号)即视为纵向冲突——
+                # 基线偏移使严格区间重叠判定不可靠，用基线距离更稳。
+                baseline_gap = abs(p.y - q.y)
+                y_conflict = baseline_gap < max(render_size, q.size)
+                x_overlap = min(p_x1, q_x1) - max(p.x0, q.x0)
+                if y_conflict and x_overlap > 0.3 * p_render_w:
+                    return True
+            return False
+
         # PATCH#6 段落可用垂直空间：到下方最近段落顶部的距离(同列)。用于防止译文
         # 因行数增多而向下溢出、压到下一段(第二页蓝框 / 标题与正文重叠等)。
         def _avail_height(idx):
@@ -702,12 +753,26 @@ class TranslateConverter(PDFConverterEx):
                         if _pr - x0 > _aw:
                             _aw = _pr - x0
                     _lh = default_line_height
-                    # 留 0.5 行余量，避免压线
+                    # 严禁重叠：要求换行后总高度严格不超过可用高度(不留正向余量)。
                     while size > 4.0:
                         _nl = _count_lines(new, size, _aw)
-                        if _nl * size * _lh <= _avh + 0.5 * size:
+                        if _nl * size * _lh <= _avh:
                             break
                         size -= 0.5
+
+            # PATCH#6b 水平溢出保护：单行段落若变宽后会压到同行右侧的另一段，
+            # 缩小字号塞进可用横向间隙。
+            if (not in_fig) and (not brk):
+                _awr = _avail_width_right(id)
+                if _awr and _awr > 8:
+                    _nat = _measure_width_g(new, size)
+                    if _nat > _awr:
+                        size = max(size * 0.5, size * (_awr / _nat))
+
+            # PATCH#6c 抑制错位的小图注：原文包围盒"竖高窄"(疑似被误抽的竖排标签)，
+            # 渲染后会横向压到同行更大字号的标题上——直接跳过不渲染。
+            if (not brk) and _is_stray_overlapping_caption(id, size):
+                continue
 
             # PATCH#4 单词级换行：对含空格的(拉丁)译文，预先在空格处计算换行点，
             # 使其按单词边界换行，而不是在单词中间硬切（如 "p / ositive"）。

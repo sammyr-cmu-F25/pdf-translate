@@ -197,11 +197,15 @@ def _build_box_oracle(doc_zh):
     figure, not each cell). Coords are converted to bottom-left to match
     pdfminer."""
     cache = {}
+    # 每页的纵向网格线 x 坐标(列边界)。用于当某单元格未被任何"够大的矩形"包围时
+    # (常见于只画边框线、不画填充矩形的表格行)，仍能由相邻列边界推断真实列宽。
+    col_edges = {}
     try:
         for pageid in range(doc_zh.page_count):
             page = doc_zh[pageid]
             ph = page.rect.height
             rects = []
+            edges = set()
             for dr in page.get_drawings():
                 for it in dr.get("items", []):
                     if it[0] == "re":
@@ -209,9 +213,39 @@ def _build_box_oracle(doc_zh):
                         if r.width > 25 and r.height > 10:  # box-sized only
                             # top-left -> bottom-left
                             rects.append((r.x0, ph - r.y1, r.x1, ph - r.y0, r.width))
+                        # 收集列边界：任何"非毛刺"矩形的左右边都算作潜在网格线，
+                        # 包括 1px 细边框矩形(它们正是被上面尺寸过滤掉的表格线)。
+                        if r.width > 2 or r.height > 2:
+                            edges.add(round(r.x0, 1))
+                            edges.add(round(r.x1, 1))
+                    elif it[0] == "l":  # 直线边框(p1, p2)
+                        try:
+                            (px0, _py0), (px1, _py1) = it[1], it[2]
+                            if abs(px1 - px0) < 1.0:  # 竖线
+                                edges.add(round(px0, 1))
+                        except Exception:
+                            pass
             cache[pageid] = rects
+            col_edges[pageid] = sorted(edges)
     except Exception:
         pass
+
+    def _col_width(pageid, cx):
+        """由列边界推断 cx 所在列的宽度(无包围矩形时的兜底)。"""
+        es = col_edges.get(pageid)
+        if not es:
+            return None
+        left = None
+        right = None
+        for e in es:
+            if e <= cx + 0.5:
+                left = e
+            elif right is None and e > cx + 0.5:
+                right = e
+                break
+        if left is not None and right is not None and right - left > 1:
+            return right - left
+        return None
 
     def oracle(pageid, x0, y0, x1, y1):
         cx = (x0 + x1) / 2.0
@@ -224,7 +258,11 @@ def _build_box_oracle(doc_zh):
                 if best_area is None or area < best_area:  # smallest enclosing
                     best_area = area
                     best_w = w
-        return best_w
+        if best_w is not None:
+            return best_w
+        # 兜底：无包围矩形(表格行只画边框线)时，按列边界估算列宽，
+        # 避免短文本碎片(如换行残留的"degree")退化成极窄宽度而压垮整表字号。
+        return _col_width(pageid, cx)
 
     return oracle
 
