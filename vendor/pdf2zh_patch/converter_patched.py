@@ -245,9 +245,15 @@ class TranslateConverter(PDFConverterEx):
                 if re.match(self.vchar, char):
                     return True
             else:
+                # PATCH: 常见算术/比较符号(+ = × ÷ ± < > 等)在普通文本/表格中是正文
+                # (如 "12+"、"3×24"、"12-18%")，不应当作公式抽取，否则相邻数字/单位会被
+                # 拆开单独翻译(如 "12 月" -> "December")。仅排除这些常见符号，真正的
+                # 数学公式仍由字体名规则与 (cid:) 规则捕获。
+                _common_math = set("+=×÷±<>~")
                 if (
                     char
                     and char != " "                                     # 非空格
+                    and char[0] not in _common_math                     # 常见算术符号视为正文
                     and (
                         unicodedata.category(char[0])
                         in ["Lm", "Mn", "Sk", "Sm", "Zl", "Zp", "Zs"]   # 文字修饰符、数学符号、分隔符号
@@ -515,11 +521,12 @@ class TranslateConverter(PDFConverterEx):
                     rw = None
                 if rw and rw > 1:
                     bw = rw * 0.92
-            if bw > 1 and (not p.brk or p.in_figure):
+            # 只对图表/表格内文字(固定方框、无法换行)做缩小。普通正文/标题宁可换行，
+            # 不缩小——否则标题会被缩得比正文还小(标题原文常被拆成很窄的几段)。
+            if p.in_figure and bw > 1:
                 nat = _measure_width_g(news[idx], sz)
                 if nat > bw + 0.1 * sz:
-                    floor = 0.25 if p.in_figure else 0.5
-                    sz = max(sz * floor, sz * (bw / nat))
+                    sz = max(sz * 0.25, sz * (bw / nat))
             return sz
 
         _region_min = {}
@@ -605,10 +612,17 @@ class TranslateConverter(PDFConverterEx):
 
             # PATCH#4 单词级换行：对含空格的(拉丁)译文，预先在空格处计算换行点，
             # 使其按单词边界换行，而不是在单词中间硬切（如 "p / ositive"）。
-            # 仅当段落需要换行(brk)、宽度有限、且文本含空格(说明是拉丁文)时启用。
+            # - brk 段落(正文)：按其原始文本宽度换行。
+            # - 非 brk 的非图表段落(如标题)：原文常被拆成很窄的几段(x1-x0 极小)，
+            #   不能按该宽度换行，否则每个词都换行；改用到页面右边距的可用宽度。
             wrap_breaks = set()
-            if brk and (x1 - x0) > 1 and " " in new.strip():
-                avail = x1 - x0
+            _wrap_avail = x1 - x0
+            if (not brk) and (not in_fig):
+                page_right = ltpage.width - 56.0  # 估计右边距
+                if page_right - x0 > _wrap_avail:
+                    _wrap_avail = page_right - x0
+            if _wrap_avail > 1 and " " in new.strip() and (brk or not in_fig):
+                avail = _wrap_avail
                 line_w = 0.0
                 last_space_ptr = None
                 seg_w_since_space = 0.0  # 自上个空格以来的宽度
@@ -719,7 +733,8 @@ class TranslateConverter(PDFConverterEx):
                             "lidx": lidx
                         })
                         cstk = ""
-                if brk and (hit_edge or hit_word_break):  # 到达换行点且原文段落存在换行
+                # 换行：brk 段落到右边界换行；任何段落命中预计算的单词换行点都换行
+                if (brk and hit_edge) or hit_word_break:
                     x = x0
                     lidx += 1
                 if vy_regex:  # 插入公式

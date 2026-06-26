@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--protect-figures", action="store_true",
                         help="Do NOT translate text inside figures/tables (restore stock pdf2zh behavior). "
                              "By default this tool translates that text too (math formulas always preserved).")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Ignore the translation cache and re-translate everything from scratch.")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -69,6 +71,27 @@ def main():
     print(f"🔄 翻译中: {os.path.basename(args.input)}")
     print(f"   {args.lang_in} → {args.lang_out} (服务: {args.service})")
 
+    # 为 LLM 类服务(openai 等)提供更明确的上下文提示，减少脱离上下文的歧义翻译，
+    # 例如把数量+单位 "12月+" 误译为月份 "December+"（应为 "12 months+"）。
+    from string import Template
+    llm_prompt = None
+    if args.service.split(":")[0] in ("openai", "azure-openai", "deepseek", "grok",
+                                      "groq", "gemini", "zhipu", "ollama", "silicon",
+                                      "qwen-mt", "xinference", "openailiked"):
+        llm_prompt = Template(
+            "You are a professional translation engine for technical and business "
+            "documents. Translate the source text from $lang_in to $lang_out.\n"
+            "Rules:\n"
+            "- Keep the formula notation {v*} unchanged.\n"
+            "- Translate a number followed by a unit literally as a quantity, NOT as "
+            "a date. For example Chinese \"12月+\" means \"12 months+\" (a duration), "
+            "not the month \"December\"; \"3月\" in a duration context means "
+            "\"3 months\".\n"
+            "- Preserve numbers, percentages, ranges (e.g. 4-6), and symbols as-is.\n"
+            "- Output only the translated text, nothing else.\n\n"
+            "Source Text: $text\n\nTranslated Text:"
+        )
+
     hl.translate(
         files=[args.input],
         output=output_dir,
@@ -77,6 +100,8 @@ def main():
         service=args.service,
         thread=args.thread,
         model=OnnxModel.load_available(),
+        ignore_cache=args.fresh,
+        prompt=llm_prompt,
     )
 
     base = os.path.splitext(os.path.basename(args.input))[0]
