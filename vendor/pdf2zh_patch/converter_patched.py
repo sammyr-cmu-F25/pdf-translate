@@ -333,7 +333,8 @@ class TranslateConverter(PDFConverterEx):
                 if in_figure and xt is not None:
                     if child.x1 < xt.x0:                       # 垂直换行
                         fig_break = True
-                    elif child.x0 > xt.x1 + 2.0 * child.size:  # 跳到相邻方框(大间隙)
+                    elif child.x0 > xt.x1 + 1.2 * child.size:  # 跳到相邻方框/单元格(列间隙)
+                        # 列间隙通常 15-20pt，远大于词间空格(3-5pt)，用 1.2*字号 区分
                         fig_break = True
 
                 # 当前字符不属于公式或当前字符是公式的第一个字符
