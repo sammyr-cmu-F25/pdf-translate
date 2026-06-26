@@ -522,13 +522,92 @@ class TranslateConverter(PDFConverterEx):
                     rw = None
                 if rw and rw > 1:
                     bw = rw * 0.92
-            # 只对图表/表格内文字(固定方框、无法换行)做缩小。普通正文/标题宁可换行，
-            # 不缩小——否则标题会被缩得比正文还小(标题原文常被拆成很窄的几段)。
+            # 图表/表格内文字：先尝试在方框宽度内按单词换行(最多 _maxlines 行)，
+            # 仅当换行后仍放不下才缩小字号。这样表格字号不必为最长单元格压到极小。
             if p.in_figure and bw > 1:
                 nat = _measure_width_g(news[idx], sz)
                 if nat > bw + 0.1 * sz:
-                    sz = max(sz * 0.25, sz * (bw / nat))
+                    has_space = " " in news[idx].strip()
+                    # 单元格允许换行到约 2 行(超过则更小)；流程图小方框允许到 3 行
+                    _maxlines = 2 if has_space else 1
+                    if has_space:
+                        # 找到使行数 <= _maxlines 的最大字号(不小于原字号 35%)
+                        lo, hi = sz * 0.35, sz
+                        best = lo
+                        for _ in range(12):
+                            mid = (lo + hi) / 2
+                            if _count_lines(news[idx], mid, bw) <= _maxlines:
+                                best = mid; lo = mid
+                            else:
+                                hi = mid
+                        sz = best
+                    else:
+                        sz = max(sz * 0.25, sz * (bw / nat))
             return sz
+
+        # PATCH#6 计算每段在给定字号、给定可用宽度下按单词换行后的行数。
+        def _count_lines(s, sz, avail_w):
+            if avail_w <= 1:
+                return 1
+            lines = 1
+            line_w = 0.0
+            i = 0
+            seg = 0.0
+            last_space = False
+            while i < len(s):
+                vm = re.match(r"\{\s*v([\d\s]+)\}", s[i:], re.IGNORECASE)
+                if vm:
+                    try:
+                        cw = vlen[int(vm.group(1).replace(" ", ""))]
+                    except Exception:
+                        cw = 0.0
+                    i += len(vm.group(0))
+                else:
+                    c = s[i]; i += 1
+                    f_ = None
+                    try:
+                        if self.fontmap["tiro"].to_unichr(ord(c)) == c:
+                            f_ = "tiro"
+                    except Exception:
+                        pass
+                    if f_ is None:
+                        f_ = self.noto_name
+                    if f_ == self.noto_name:
+                        cw = self.noto.char_lengths(c, sz)[0]
+                    else:
+                        cw = self.fontmap[f_].char_width(ord(c)) * sz
+                if line_w + cw > avail_w and line_w > 0:
+                    lines += 1
+                    line_w = seg + cw if not last_space else cw
+                    seg = 0.0
+                else:
+                    line_w += cw
+                last_space = (not vm) and (s[i-1] == " " if i > 0 else False)
+                if not vm and i > 0 and s[i-1] == " ":
+                    seg = 0.0
+                else:
+                    seg += cw
+            return lines
+
+        # PATCH#6 段落可用垂直空间：到下方最近段落顶部的距离(同列)。用于防止译文
+        # 因行数增多而向下溢出、压到下一段(第二页蓝框 / 标题与正文重叠等)。
+        def _avail_height(idx):
+            p = pstk[idx]
+            # pdfminer 坐标 y 向上增大；"下方"段落的 y 更小
+            best = None
+            for j in range(len(pstk)):
+                if j == idx:
+                    continue
+                q = pstk[j]
+                # 同列(水平有重叠)且在下方(顶部更低)
+                x_overlap = min(p.x1, q.x1) - max(p.x0, q.x0)
+                if x_overlap <= 5:
+                    continue
+                if q.y1 < p.y1 - 1:  # q 在 p 下方
+                    gap = p.y1 - q.y1
+                    if best is None or gap < best:
+                        best = gap
+            return best
 
         _region_min = {}
         for _i in range(len(news)):
@@ -611,6 +690,25 @@ class TranslateConverter(PDFConverterEx):
             else:
                 size = _shrunk_size(id)
 
+            # PATCH#6 垂直溢出保护：若译文按当前字号换行后所占高度超过可用垂直空间
+            # (到下方段落的距离)，逐步缩小字号直到放下，避免压到下一段(严禁重叠)。
+            if not in_fig and " " in new.strip():
+                _avh = _avail_height(id)
+                if _avh and _avh > 4:
+                    # 换行可用宽度：与下方 PATCH#4 一致(正文用 x1-x0，标题用到右边距)
+                    _aw = x1 - x0
+                    if (not brk):
+                        _pr = ltpage.width - 56.0
+                        if _pr - x0 > _aw:
+                            _aw = _pr - x0
+                    _lh = default_line_height
+                    # 留 0.5 行余量，避免压线
+                    while size > 4.0:
+                        _nl = _count_lines(new, size, _aw)
+                        if _nl * size * _lh <= _avh + 0.5 * size:
+                            break
+                        size -= 0.5
+
             # PATCH#4 单词级换行：对含空格的(拉丁)译文，预先在空格处计算换行点，
             # 使其按单词边界换行，而不是在单词中间硬切（如 "p / ositive"）。
             # - brk 段落(正文)：按其原始文本宽度换行。
@@ -622,7 +720,15 @@ class TranslateConverter(PDFConverterEx):
                 page_right = ltpage.width - 56.0  # 估计右边距
                 if page_right - x0 > _wrap_avail:
                     _wrap_avail = page_right - x0
-            if _wrap_avail > 1 and " " in new.strip() and (brk or not in_fig):
+            elif in_fig and self.box_oracle is not None:
+                # 表格/图表单元格：按真实方框宽度换行(配合 PATCH#5 的多行字号估算)
+                try:
+                    _rw = self.box_oracle(ltpage.pageid, pstk[id].x0, pstk[id].y0, pstk[id].x1, pstk[id].y1)
+                except Exception:
+                    _rw = None
+                if _rw and _rw > _wrap_avail:
+                    _wrap_avail = _rw * 0.92
+            if _wrap_avail > 1 and " " in new.strip():
                 avail = _wrap_avail
                 line_w = 0.0
                 last_space_ptr = None
