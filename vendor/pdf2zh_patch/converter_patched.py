@@ -832,6 +832,17 @@ class TranslateConverter(PDFConverterEx):
                     _rw = None
                 if _rw and _rw > _wrap_avail:
                     _wrap_avail = _rw * 0.92
+            # 文本未变(原文已是目标语言、被原样保留)时，它在原框里本就放得下；我们重排
+            # 用的字体测宽可能比原字体略宽，会误触发换行(如把 "REPORT" 断成 "REPO"/"RT")。
+            # 这种情况给足够的换行宽度，避免无谓的单词内/词间硬换行。
+            _unchanged = (new == sstk[id])
+            if _unchanged and (not brk):
+                _natw = _measure_width(new, size)
+                # 不超过页面可用横向范围(从 x0 到右边距)，以免长文本冲出页面
+                _page_room = (ltpage.width - 56.0) - x0
+                _target = min(_natw + 2, max(_wrap_avail, _page_room))
+                if _target > _wrap_avail:
+                    _wrap_avail = _target
             if _wrap_avail > 1 and " " in new.strip():
                 avail = _wrap_avail
                 line_w = 0.0
