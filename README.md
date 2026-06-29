@@ -118,11 +118,29 @@ pip install pdf2zh
 
 PDFのテキストスパンと正確な座標を抽出 → 翻訳APIを呼び出して翻訳 → 同じ位置に翻訳テキストを配置 → ベクトルグラフィック・線・画像はそのまま保持
 
+## Translating text baked into charts/images / 翻译图表位图文字
+
+Chart titles, axis labels, and legends are often rasterized into the figure
+bitmap (no text layer), so the normal pipeline can't reach them. Pass
+`--translate-images` to also translate that text via OCR + redraw:
+
+```bash
+python pdf-translate.py input.pdf -li zh -lo en --service openai --translate-images
+```
+
+Requirements: `--service openai` (uses GPT-4o vision), a CJK source language
+(zh/ja/ko), and `pip install easyocr`. It detects text regions with EasyOCR,
+transcribes+translates each with the vision model, erases the original pixels,
+and redraws the translation (color/size matched), preserving the image's
+transparency. Cost: an OCR model load plus one vision call per detected label.
+
 ## Known Limitations / 已知限制 / 既知の制限
 
 - Scanned PDFs (pure image-based) are not supported — use OCR first
 - Machine translation may need manual review for domain-specific terminology
 - Large files (>50 pages) may take longer
+- `--translate-images` covers CJK→other only; redrawn font is Arial (not the
+  chart's original font), and very dense legends may clip slightly
 
 ## License
 

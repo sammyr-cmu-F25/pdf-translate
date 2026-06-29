@@ -56,6 +56,10 @@ def main():
                              "By default this tool translates that text too (math formulas always preserved).")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore the translation cache and re-translate everything from scratch.")
+    parser.add_argument("--translate-images", action="store_true",
+                        help="Also translate text baked into chart/figure bitmaps (OCR + redraw). "
+                             "Requires --service openai and a CJK source language; needs easyocr. "
+                             "Adds an OCR model load + a vision call per detected label.")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -131,11 +135,34 @@ def main():
     )
 
     base = os.path.splitext(os.path.basename(args.input))[0]
+    out_paths = {}
     for suffix, label in (("mono", "纯翻译版"), ("dual", "双语对照版")):
         path = os.path.join(output_dir, f"{base}-{suffix}.pdf")
         if os.path.exists(path):
+            out_paths[suffix] = path
             size = os.path.getsize(path) // 1024
             print(f"✅ {label}: {path} ({size} KB)")
+
+    # 图像内文字翻译(后处理)：翻译图表位图中烧录的源语言文字。
+    if args.translate_images and not args.no_patch:
+        try:
+            from pdf2zh_patch.image_translate import translate_images_in_pdf
+        except Exception as e:
+            print(f"⏭️  图像翻译模块加载失败，已跳过: {e}")
+            translate_images_in_pdf = None
+        if translate_images_in_pdf is not None:
+            chosen_model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+            for suffix in ("mono", "dual"):
+                if suffix not in out_paths:
+                    continue
+                print(f"🖼️  翻译图像内文字: {os.path.basename(out_paths[suffix])} …")
+                imgs, blocks = translate_images_in_pdf(
+                    out_paths[suffix], args.lang_in, args.lang_out,
+                    args.service, chosen_model)
+                if blocks:
+                    print(f"   ✅ 替换了 {blocks} 处图像文字(涉及 {imgs} 张图)")
+                else:
+                    print("   (未发现可翻译的图像文字)")
 
     # 漏译提示：当目标语言非中日韩时，扫描输出 PDF，列出仍残留中日韩字符的文字
     # (无论来自翻译漏译还是排版残留)，便于人工复核。图表内的位图文字无法检出，

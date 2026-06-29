@@ -117,3 +117,8 @@ websockets==15.0.1
 xinference-client==2.11.0
 xsdata==26.2
 yarl==1.24.2
+
+# --- Optional: only for --translate-images (chart/figure bitmap text) ---
+# Heavy, platform-specific (pulls in torch). Install separately if needed:
+#   pip install easyocr
+# easyocr
