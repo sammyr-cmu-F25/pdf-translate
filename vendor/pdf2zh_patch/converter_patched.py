@@ -660,12 +660,26 @@ class TranslateConverter(PDFConverterEx):
                         best = gap
             return best
 
+        # PATCH#5 区域统一字号：取区域内各段缩放后字号的最小值。但单个被错误测量
+        # (列宽兜底失败)的单元格不应把整表压到不可读。因此对统一字号设下限：
+        # 不低于该区域原始字号的 _REGION_FLOOR_FRAC，也不低于绝对值 _REGION_FLOOR_ABS。
+        # 真正放不下的长单元格会在后续按需各自换行/缩小，而不牵连整表。
+        _REGION_FLOOR_FRAC = 0.6
+        _REGION_FLOOR_ABS = 5.0
         _region_min = {}
+        _region_base = {}  # 区域内最大原始字号(代表该表的"正常"字号)
         for _i in range(len(news)):
             _r = pstk[_i].region
             if _r >= 0:
                 _s = _shrunk_size(_i)
                 _region_min[_r] = min(_region_min.get(_r, _s), _s)
+                _region_base[_r] = max(_region_base.get(_r, 0.0), pstk[_i].size)
+        for _r in list(_region_min.keys()):
+            _floor = max(_REGION_FLOOR_ABS, _region_base.get(_r, 0.0) * _REGION_FLOOR_FRAC)
+            # 下限不得超过原始字号(避免把本该缩小的小表反而放大)
+            _floor = min(_floor, _region_base.get(_r, _floor))
+            if _region_min[_r] < _floor:
+                _region_min[_r] = _floor
 
         for id, new in enumerate(news):
             x: float = pstk[id].x                       # 段落初始横坐标
@@ -743,15 +757,24 @@ class TranslateConverter(PDFConverterEx):
 
             # PATCH#6 垂直溢出保护：若译文按当前字号换行后所占高度超过可用垂直空间
             # (到下方段落的距离)，逐步缩小字号直到放下，避免压到下一段(严禁重叠)。
-            if not in_fig and " " in new.strip():
+            # 也覆盖图表内的多行小卡片(如首页四列导航卡)：原文 1~2 行的中文译成英文后
+            # 行数翻倍，若不缩小会竖向压到下方卡片/同卡其它段落。
+            if " " in new.strip():
                 _avh = _avail_height(id)
                 if _avh and _avh > 4:
-                    # 换行可用宽度：与下方 PATCH#4 一致(正文用 x1-x0，标题用到右边距)
+                    # 换行可用宽度：正文用 x1-x0，标题用到右边距；图表内用真实方框宽度。
                     _aw = x1 - x0
-                    if (not brk):
+                    if (not brk) and (not in_fig):
                         _pr = ltpage.width - 56.0
                         if _pr - x0 > _aw:
                             _aw = _pr - x0
+                    elif in_fig and self.box_oracle is not None:
+                        try:
+                            _rw6 = self.box_oracle(ltpage.pageid, pstk[id].x0, pstk[id].y0, pstk[id].x1, pstk[id].y1)
+                        except Exception:
+                            _rw6 = None
+                        if _rw6 and _rw6 > _aw:
+                            _aw = _rw6 * 0.92
                     _lh = default_line_height
                     # 严禁重叠：要求换行后总高度严格不超过可用高度(不留正向余量)。
                     while size > 4.0:
@@ -760,14 +783,30 @@ class TranslateConverter(PDFConverterEx):
                             break
                         size -= 0.5
 
-            # PATCH#6b 水平溢出保护：单行段落若变宽后会压到同行右侧的另一段，
-            # 缩小字号塞进可用横向间隙。
-            if (not in_fig) and (not brk):
+            # PATCH#6b 水平溢出保护：单行段落若变宽后会压到同行右侧的另一段，按到右邻
+            # 的间距缩小字号(硬约束，严禁重叠)。
+            #   - 非图表段落：一律检查。
+            #   - 图表内段落：也检查并排自由标签(如迷你图例"同比增长"/"毛利率")，但先排除
+            #     那些拥有更宽网格列、可在单元格内换行的正常表格单元(交给 PATCH#5/#4 换行)，
+            #     以免把正常表格也压小。
+            if (not brk):
                 _awr = _avail_width_right(id)
                 if _awr and _awr > 8:
                     _nat = _measure_width_g(new, size)
                     if _nat > _awr:
-                        size = max(size * 0.5, size * (_awr / _nat))
+                        # 能否靠换行避免重叠?只有当该段的可换行列宽 <= 到右邻的间距
+                        # (即换行后不会越过右邻)才算"可换行"，交给 PATCH#4 处理；否则
+                        # (列比间距宽，如自由图例落在很宽的图框内)换行仍会压到右邻，
+                        # 必须在此缩小字号。
+                        _col = None
+                        if in_fig and self.box_oracle is not None:
+                            try:
+                                _col = self.box_oracle(ltpage.pageid, pstk[id].x0, pstk[id].y0, pstk[id].x1, pstk[id].y1)
+                            except Exception:
+                                _col = None
+                        _wrappable = bool(_col) and _col <= _awr + 4 and (" " in new.strip())
+                        if not _wrappable:
+                            size = max(size * 0.45, size * (_awr / _nat))
 
             # PATCH#6c 抑制错位的小图注：原文包围盒"竖高窄"(疑似被误抽的竖排标签)，
             # 渲染后会横向压到同行更大字号的标题上——直接跳过不渲染。

@@ -34,12 +34,20 @@ sys.path.insert(0, os.path.join(_REPO, "vendor"))
 
 def main():
     os.environ.setdefault("PYTHONUTF8", "1")
+    # macOS 上 ONNXRuntime 与 PyTorch 各自携带一份 libomp，重复加载会在解释器退出时
+    # 触发段错误(translate 已完成但 PDF 尚未写盘 → 输出丢失)。允许重复加载并限制
+    # OpenMP 线程数可避免该崩溃。
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
 
     parser = argparse.ArgumentParser(description="Translate a PDF while preserving layout (patched pdf2zh).")
     parser.add_argument("input", help="Path to the input PDF")
     parser.add_argument("-li", "--lang-in", default="en", help="Source language code (default: en)")
     parser.add_argument("-lo", "--lang-out", default="zh", help="Target language code (default: zh)")
     parser.add_argument("-s", "--service", default="google", help="Translation service (default: google)")
+    parser.add_argument("-m", "--model", default="",
+                        help="Model name for LLM services (default: gpt-4o for openai). "
+                             "gpt-4o leaves far fewer untranslated fragments than gpt-4o-mini.")
     parser.add_argument("-o", "--output", default="", help="Output directory (default: alongside input)")
     parser.add_argument("-t", "--thread", type=int, default=4, help="Worker threads (default: 4)")
     parser.add_argument("--no-patch", action="store_true", help="Disable enhancement patches (use stock pdf2zh)")
@@ -53,6 +61,17 @@ def main():
     if not os.path.exists(args.input):
         print(f"❌ 文件不存在: {args.input}")
         return 1
+
+    # LLM 服务的模型选择：默认用 gpt-4o(比 gpt-4o-mini 漏译/残留中日韩字符少得多)。
+    # 通过环境变量覆盖 pdf2zh 配置(set_envs 会优先读取 os.environ)。
+    _service_base = args.service.split(":")[0]
+    if _service_base in ("openai", "azure-openai"):
+        chosen_model = args.model or "gpt-4o"
+        os.environ["OPENAI_MODEL"] = chosen_model
+        print(f"🧠 模型: {chosen_model}")
+    elif args.model:
+        # 其它 LLM 服务也允许显式指定模型
+        os.environ.setdefault("OPENAI_MODEL", args.model)
 
     # 应用补丁（必须在 high_level 构建 converter 之前）
     if not args.no_patch:
@@ -88,6 +107,13 @@ def main():
             "not the month \"December\"; \"3月\" in a duration context means "
             "\"3 months\".\n"
             "- Preserve numbers, percentages, ranges (e.g. 4-6), and symbols as-is.\n"
+            "- Translate the ENTIRE text. Do not leave any $lang_in words or "
+            "characters untranslated, including at the start or end of a fragment, "
+            "even if the fragment looks incomplete.\n"
+            "- Translate ONLY what is written. Do NOT complete, continue, expand, or "
+            "add content. If the source is a truncated fragment (e.g. ends with '…' "
+            "or cuts off mid-word), translate just that fragment and keep it about the "
+            "same length; never invent the missing continuation.\n"
             "- Output only the translated text, nothing else.\n\n"
             "Source Text: $text\n\nTranslated Text:"
         )
@@ -111,7 +137,53 @@ def main():
             size = os.path.getsize(path) // 1024
             print(f"✅ {label}: {path} ({size} KB)")
 
+    # 漏译提示：当目标语言非中日韩时，扫描输出 PDF，列出仍残留中日韩字符的文字
+    # (无论来自翻译漏译还是排版残留)，便于人工复核。图表内的位图文字无法检出，
+    # 仅检查 PDF 文本层。
+    _cjk_targets = {"zh", "zh-cn", "zh-tw", "ja", "ko", "chinese", "japanese", "korean"}
+    if args.lang_out.lower() not in _cjk_targets:
+        _scan_leftover_cjk(os.path.join(output_dir, f"{base}-mono.pdf"))
+
     return 0
+
+
+def _scan_leftover_cjk(mono_path):
+    """扫描译文 PDF 文本层，提示仍含中日韩字符的片段(可能需人工复核)。"""
+    if not os.path.exists(mono_path):
+        return
+    try:
+        import re
+        import fitz  # PyMuPDF
+    except Exception:
+        return
+    cjk = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+    # LLM 残留：提示词回显 / 拒绝语 — 不应出现在正常译文里。
+    artifact = re.compile(
+        r"^(translated\s+text|translation|target\s+text)\s*[:：]\s*$"
+        r"|provide the source|no source text|i'?m sorry|as an ai",
+        re.IGNORECASE,
+    )
+    found = []
+    try:
+        doc = fitz.open(mono_path)
+        for pid in range(doc.page_count):
+            for blk in doc[pid].get_text("dict")["blocks"]:
+                for line in blk.get("lines", []):
+                    for sp in line.get("spans", []):
+                        t = sp["text"].strip()
+                        if cjk.search(t):
+                            found.append((pid + 1, "未译", t[:50]))
+                        elif artifact.search(t):
+                            found.append((pid + 1, "残留", t[:50]))
+        doc.close()
+    except Exception:
+        return
+    if found:
+        print(f"\n⚠️  输出中有 {len(found)} 处疑似问题文字(未译/LLM 残留)，建议人工复核：")
+        for pg, kind, txt in found[:20]:
+            print(f"   • 第 {pg} 页 [{kind}]: {txt!r}")
+        if len(found) > 20:
+            print(f"   …… 其余 {len(found) - 20} 处略")
 
 
 if __name__ == "__main__":
