@@ -843,7 +843,10 @@ class TranslateConverter(PDFConverterEx):
                 _target = min(_natw + 2, max(_wrap_avail, _page_room))
                 if _target > _wrap_avail:
                     _wrap_avail = _target
-            if _wrap_avail > 1 and " " in new.strip():
+            # 是否需要换行：含空格(拉丁按单词换)，或含 CJK(中日韩可在任意字符间换行——
+            # 译文为中文等时没有空格，必须支持逐字换行，否则整行溢出列宽被裁切)。
+            _has_cjk_new = any(_char_is_cjk(ch) for ch in new)
+            if _wrap_avail > 1 and (" " in new.strip() or _has_cjk_new):
                 avail = _wrap_avail
                 line_w = 0.0
                 last_space_ptr = None
@@ -885,9 +888,15 @@ class TranslateConverter(PDFConverterEx):
                     else:
                         seg_w_since_space += cw
                     if line_w + cw > avail and last_space_ptr is not None:
-                        # 在最近的空格处换行
+                        # 在最近的空格处换行(拉丁单词边界)
                         wrap_breaks.add(last_space_ptr)
                         line_w = seg_w_since_space  # 新行从该单词开始
+                        last_space_ptr = None
+                    elif line_w + cw > avail and i > 0 and (_char_is_cjk(cc) or _char_is_cjk(new[i - 1])):
+                        # CJK 可在此字符前换行(无空格)：在当前字符处断行
+                        wrap_breaks.add(i)
+                        line_w = cw
+                        seg_w_since_space = cw
                         last_space_ptr = None
                     else:
                         line_w += cw
