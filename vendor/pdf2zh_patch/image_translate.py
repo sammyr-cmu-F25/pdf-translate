@@ -64,8 +64,11 @@ def _ocr_translate_crop(client, model, crop, lang_out):
     prompt = (
         f"This is a tiny crop of a chart label. Transcribe ONLY the text exactly "
         f"as written (read the glyphs, do not guess from context), then ' | ' then "
-        f"a SHORT natural {lang_out} translation. If there is no readable text, "
-        f"reply 'NONE'. Output one line, nothing else."
+        f"a SHORT natural {lang_out} translation. "
+        f"Keep numbers, percent signs (%), units, and symbols EXACTLY as written — "
+        f"e.g. '88%' stays '88%', never spell it out as '88 percent'. "
+        f"If the text is purely a number/percentage/symbol, the translation is identical to it. "
+        f"If there is no readable text, reply 'NONE'. Output one line, nothing else."
     )
     try:
         r = client.chat.completions.create(
@@ -190,17 +193,22 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
             for xx in range(max(0, x0 - 1), min(OW, x1 + 1)):
                 img.putpixel((xx, yy), (0, 0, 0, 0))
 
-    def _draw_fit(eng, x0, y0, x1, y1, fg, vertical=False):
-        bw, bh = x1 - x0, y1 - y0
-        if vertical:
-            bw, bh = bh, bw  # 文字按水平排版后再旋转，故宽高互换
+    def _fit_size(eng, bw, bh):
+        """求能把 eng 放进 (bw 的 1.5 倍, bh 的 1.25 倍) 的最大字号。"""
         max_w = bw * 1.5
         size = bh + 2
         while size > 5:
             f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
             if tb[2] - tb[0] <= max_w and tb[3] - tb[1] <= bh * 1.25:
-                break
+                return size
             size -= 1
+        return max(5, size)
+
+    def _draw_fit(eng, x0, y0, x1, y1, fg, vertical=False, fixed_size=None):
+        bw, bh = x1 - x0, y1 - y0
+        if vertical:
+            bw, bh = bh, bw  # 文字按水平排版后再旋转，故宽高互换
+        size = fixed_size if fixed_size else _fit_size(eng, bw, bh)
         f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
         if vertical:
@@ -216,6 +224,8 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
             tx = max(2, min(cx - tw // 2, OW - tw - 2))
             draw.text((tx, y0 + ((y1 - y0) - th) // 2 - tb[1]), eng, font=f, fill=fg)
 
+    # 第一遍：识别+翻译，收集待绘制项 (不立即绘制，以便先统一同类标签字号)。
+    items = []  # (x0,y0,x1,y1, eng, is_vert, fg, fit_size)
     for i, d in enumerate(dets):
         HX0, HY0, HX1, HY1, raw, conf = d
         x0, y0 = int(HX0 * sx), int(HY0 * sy)
@@ -224,18 +234,14 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
             continue
         w, h = HX1 - HX0, HY1 - HY0
         is_vert = h > w * 1.3  # 竖高窄 -> 疑似竖排
-
         if i in merged:
-            continue  # 已并入相邻 CJK 框，由那一项统一处理
-
+            continue
         if i not in cjk_idx and not (is_vert and not raw.strip()):
-            continue  # 既非 CJK、又非待重识别的竖排空框 -> 跳过
-
-        # 裁剪(竖排则旋转成水平再识别)
+            continue
         crop = hidpi.crop((max(0, HX0 - 10), max(0, HY0 - 10),
                            min(HW, HX1 + 10), min(HH, HY1 + 10)))
         if is_vert:
-            crop = crop.rotate(-90, expand=True)  # 竖排转为水平供 OCR
+            crop = crop.rotate(-90, expand=True)
         key = raw.strip() or f"vert@{x0},{y0}"
         eng = _TRANS_CACHE.get(key)
         if eng is None:
@@ -245,8 +251,41 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
         if not eng:
             continue
         fg = _text_color(arr, x0, y0, x1, y1)
+        bw, bh = (x1 - x0, y1 - y0) if not is_vert else (y1 - y0, x1 - x0)
+        items.append([x0, y0, x1, y1, eng, is_vert, fg, _fit_size(eng, bw, bh)])
+
+    if not items:
+        return 0
+
+    # 统一同类标签字号：把"同一类"标签(横排、原框高度相近、左边缘相近——典型如一组
+    # 坐标轴类目标签)归为一组，取组内最小字号，避免长短标签字号忽大忽小、长标签压到图。
+    horiz = [it for it in items if not it[5]]
+    used = [False] * len(horiz)
+    for a in range(len(horiz)):
+        if used[a]:
+            continue
+        grp = [a]
+        ha = horiz[a][3] - horiz[a][1]
+        for b in range(a + 1, len(horiz)):
+            if used[b]:
+                continue
+            hb = horiz[b][3] - horiz[b][1]
+            same_h = abs(ha - hb) <= max(4, 0.35 * ha)
+            same_x = abs(horiz[a][0] - horiz[b][0]) <= max(8, 0.05 * OW)
+            if same_h and same_x:
+                grp.append(b)
+        if len(grp) >= 2:
+            gsize = min(horiz[g][7] for g in grp)
+            for g in grp:
+                horiz[g][7] = gsize
+                used[g] = True
+        else:
+            used[a] = True
+
+    # 第二遍：抹除+绘制(用统一后的字号)。
+    for x0, y0, x1, y1, eng, is_vert, fg, fsize in items:
         _erase(x0, y0, x1, y1)
-        _draw_fit(eng, x0, y0, x1, y1, fg, vertical=is_vert)
+        _draw_fit(eng, x0, y0, x1, y1, fg, vertical=is_vert, fixed_size=fsize)
         n += 1
 
     if n == 0:
