@@ -89,14 +89,24 @@ def _ocr_translate_crop(client, model, crop, lang_out):
 
 
 def _text_color(arr, x0, y0, x1, y1):
-    """方框内文字颜色 = 最不透明且最"鲜明"(偏离灰)的像素，作为重绘颜色。"""
+    """方框内文字颜色：背景=不透明像素的中位色(占多数)；文字=离背景最远的那批像素的
+    代表色。这样无论文字是黑/蓝/红/绿都能正确取到，且不会误取浅色背景或抗锯齿边缘。"""
     import numpy as np
     sub = arr[y0:y1, x0:x1].reshape(-1, 4).astype(int)
-    op = sub[sub[:, 3] > 128]
+    op = sub[sub[:, 3] > 128][:, :3]
     if len(op) == 0:
-        return (80, 80, 80, 255)
-    score = op[:, :3].sum(1) + np.abs(op[:, 0] - op[:, 1]) + np.abs(op[:, 1] - op[:, 2])
-    return tuple(int(v) for v in op[int(score.argmax())])
+        return (60, 60, 60, 255)
+    bg = np.median(op, axis=0)                       # 背景色(多数像素)
+    dist = np.abs(op - bg).sum(axis=1)               # 每个像素与背景的距离
+    far_thr = max(60, dist.max() * 0.6)              # 取"明显非背景"的像素(文字+其浓边)
+    fg_pixels = op[dist >= far_thr]
+    if len(fg_pixels) == 0:
+        fg_pixels = op[dist.argmax()][None, :]
+    # 文字核心色：这些前景像素里"最浓"(离背景最远)的中位色，避免抗锯齿浅边拉淡。
+    d2 = np.abs(fg_pixels - bg).sum(axis=1)
+    core = fg_pixels[d2 >= np.percentile(d2, 70)]
+    rep = np.median(core, axis=0).astype(int) if len(core) else fg_pixels[d2.argmax()].astype(int)
+    return (int(rep[0]), int(rep[1]), int(rep[2]), 255)
 
 
 def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.0):
