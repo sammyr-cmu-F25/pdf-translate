@@ -145,21 +145,98 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
     HW, HH = hidpi.size
     sx, sy = OW / HW, OH / HH
 
-    results = reader.readtext(np.array(hidpi), detail=1)
+    # EasyOCR：开启 rotation_info 以便检测竖排/旋转文字框(其识别仍弱，靠 GPT-4o 兜底)。
+    try:
+        results = reader.readtext(np.array(hidpi), detail=1, rotation_info=[90, 270])
+    except Exception:
+        results = reader.readtext(np.array(hidpi), detail=1)
+
+    # 归一化为 (HX0,HY0,HX1,HY1, raw, conf)
+    dets = []
+    for box, raw, conf in results:
+        xs = [p[0] for p in box]
+        ys = [p[1] for p in box]
+        dets.append([min(xs), min(ys), max(xs), max(ys), raw, conf])
+
+    def _overlap(a, b):
+        ix = min(a[2], b[2]) - max(a[0], b[0])
+        iy = min(a[3], b[3]) - max(a[1], b[1])
+        return ix > -6 and iy > 0  # 同一行且横向相邻/相交(留 6px 容差)
+
+    # 标记需要处理的检测：含 CJK -> 翻译；与 CJK 同行相邻的纯拉丁框 -> 并入该 CJK 框的
+    # 包围盒(其内容会被相邻 CJK 的译文覆盖，如标题前缀 "AI"；并入后统一抹除+重绘，避免
+    # 单独抹除把已绘译文打出空洞)；竖高窄的空/低置信框 -> 旋转重识别。
+    cjk_idx = [i for i, d in enumerate(dets) if _has_cjk(d[4]) and d[5] >= min_conf]
+    merged = set()
+    for j, d in enumerate(dets):
+        if j in cjk_idx or _has_cjk(d[4]):
+            continue
+        for i in cjk_idx:
+            if _overlap(d, dets[i]):
+                # 把拉丁框并入 CJK 框的包围盒
+                dets[i][0] = min(dets[i][0], d[0])
+                dets[i][1] = min(dets[i][1], d[1])
+                dets[i][2] = max(dets[i][2], d[2])
+                dets[i][3] = max(dets[i][3], d[3])
+                merged.add(j)
+                break
 
     arr = np.array(img)
     draw = ImageDraw.Draw(img)
     n = 0
-    for box, raw, conf in results:
-        if conf < min_conf or not _has_cjk(raw):
+
+    def _erase(x0, y0, x1, y1):
+        for yy in range(max(0, y0 - 1), min(OH, y1 + 1)):
+            for xx in range(max(0, x0 - 1), min(OW, x1 + 1)):
+                img.putpixel((xx, yy), (0, 0, 0, 0))
+
+    def _draw_fit(eng, x0, y0, x1, y1, fg, vertical=False):
+        bw, bh = x1 - x0, y1 - y0
+        if vertical:
+            bw, bh = bh, bw  # 文字按水平排版后再旋转，故宽高互换
+        max_w = bw * 1.5
+        size = bh + 2
+        while size > 5:
+            f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
+            if tb[2] - tb[0] <= max_w and tb[3] - tb[1] <= bh * 1.25:
+                break
+            size -= 1
+        f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        if vertical:
+            # 在透明小图上水平绘制，再旋转 90° 贴回(竖排标签，如 Y 轴标题)
+            pad = 4
+            tile = Image.new("RGBA", (tw + 2 * pad, th + 2 * pad), (0, 0, 0, 0))
+            ImageDraw.Draw(tile).text((pad - tb[0], pad - tb[1]), eng, font=f, fill=fg)
+            tile = tile.rotate(90, expand=True)
+            cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+            img.alpha_composite(tile, (max(0, cx - tile.width // 2), max(0, cy - tile.height // 2)))
+        else:
+            cx = (x0 + x1) // 2
+            tx = max(2, min(cx - tw // 2, OW - tw - 2))
+            draw.text((tx, y0 + ((y1 - y0) - th) // 2 - tb[1]), eng, font=f, fill=fg)
+
+    for i, d in enumerate(dets):
+        HX0, HY0, HX1, HY1, raw, conf = d
+        x0, y0 = int(HX0 * sx), int(HY0 * sy)
+        x1, y1 = int(HX1 * sx), int(HY1 * sy)
+        if x1 - x0 < 2 or y1 - y0 < 2:
             continue
-        xs = [p[0] for p in box]
-        ys = [p[1] for p in box]
-        HX0, HY0, HX1, HY1 = min(xs), min(ys), max(xs), max(ys)
-        # 用高 DPI 清晰裁剪做识别+翻译
+        w, h = HX1 - HX0, HY1 - HY0
+        is_vert = h > w * 1.3  # 竖高窄 -> 疑似竖排
+
+        if i in merged:
+            continue  # 已并入相邻 CJK 框，由那一项统一处理
+
+        if i not in cjk_idx and not (is_vert and not raw.strip()):
+            continue  # 既非 CJK、又非待重识别的竖排空框 -> 跳过
+
+        # 裁剪(竖排则旋转成水平再识别)
         crop = hidpi.crop((max(0, HX0 - 10), max(0, HY0 - 10),
                            min(HW, HX1 + 10), min(HH, HY1 + 10)))
-        key = raw.strip()
+        if is_vert:
+            crop = crop.rotate(-90, expand=True)  # 竖排转为水平供 OCR
+        key = raw.strip() or f"vert@{x0},{y0}"
         eng = _TRANS_CACHE.get(key)
         if eng is None:
             eng = _ocr_translate_crop(client, model, crop, lang_out)
@@ -167,32 +244,9 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
                 _TRANS_CACHE[key] = eng
         if not eng:
             continue
-        # 映射回原图像素坐标
-        x0, y0 = int(HX0 * sx), int(HY0 * sy)
-        x1, y1 = int(HX1 * sx), int(HY1 * sy)
-        if x1 - x0 < 2 or y1 - y0 < 2:
-            continue
         fg = _text_color(arr, x0, y0, x1, y1)
-        bw, bh = x1 - x0, y1 - y0
-        # 抹除原文像素(透明)
-        for yy in range(max(0, y0 - 1), min(OH, y1 + 1)):
-            for xx in range(max(0, x0 - 1), min(OW, x1 + 1)):
-                img.putpixel((xx, yy), (0, 0, 0, 0))
-        # 自适应字号：宽度不超过 1.5×原框(居中标签留些余量)，高度不超过 1.25×
-        max_w = bw * 1.5
-        size = bh + 2
-        while size > 5:
-            f = _font(size)
-            tb = draw.textbbox((0, 0), eng, font=f)
-            if tb[2] - tb[0] <= max_w and tb[3] - tb[1] <= bh * 1.25:
-                break
-            size -= 1
-        f = _font(size)
-        tb = draw.textbbox((0, 0), eng, font=f)
-        tw, th = tb[2] - tb[0], tb[3] - tb[1]
-        cx = (x0 + x1) // 2
-        tx = max(2, min(cx - tw // 2, OW - tw - 2))
-        draw.text((tx, y0 + (bh - th) // 2 - tb[1]), eng, font=f, fill=fg)
+        _erase(x0, y0, x1, y1)
+        _draw_fit(eng, x0, y0, x1, y1, fg, vertical=is_vert)
         n += 1
 
     if n == 0:
