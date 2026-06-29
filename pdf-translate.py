@@ -58,7 +58,8 @@ def main():
                         help="Ignore the translation cache and re-translate everything from scratch.")
     parser.add_argument("--translate-images", action="store_true",
                         help="Also translate text baked into chart/figure bitmaps (OCR + redraw). "
-                             "Requires --service openai and a CJK source language; needs easyocr. "
+                             "Requires --service openai; works CJK<->English (source and target "
+                             "must differ in script); needs easyocr. "
                              "Adds an OCR model load + a vision call per detected label.")
     args = parser.parse_args()
 

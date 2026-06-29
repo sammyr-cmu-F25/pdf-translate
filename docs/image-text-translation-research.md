@@ -1,3 +1,4 @@
+
 # Research: Translating Chinese text baked into chart/figure images
 
 Status: research notes (2026-06-29). Not yet implemented in the pipeline.

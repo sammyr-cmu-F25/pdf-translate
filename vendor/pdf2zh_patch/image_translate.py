@@ -21,7 +21,8 @@ import io
 import os
 import re
 
-# CJK(中日韩)字符。目前检测以 CJK 源语言为主(中→英等)。
+# CJK(中日韩)字符；拉丁字母。用于按源语言决定检测哪种文字。
+_LATIN_LETTER_RE = re.compile(r"[A-Za-z]")
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
 # 进程内缓存 EasyOCR reader 与逐框翻译，避免重复加载/重复调用。
@@ -41,14 +42,29 @@ def _get_reader(langs=("ch_sim", "en")):
     return _READER
 
 
-def _font(size):
+# 拉丁字体候选(目标为英文等)。
+_LATIN_FONTS = (
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+)
+# 中日韩字体候选(目标为中/日/韩时必须用，否则汉字会渲染成方框)。
+_CJK_FONTS = (
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/arphic/uming.ttc",
+)
+
+
+def _font(size, cjk=False):
     from PIL import ImageFont
-    for p in (
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/Library/Fonts/Arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
+    paths = (_CJK_FONTS + _LATIN_FONTS) if cjk else _LATIN_FONTS
+    for p in paths:
         try:
             return ImageFont.truetype(p, size)
         except Exception:
@@ -112,11 +128,21 @@ def _text_color(arr, x0, y0, x1, y1):
     return (int(rep[0]), int(rep[1]), int(rep[2]), 255)
 
 
-def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.0):
-    """翻译单张嵌入图像中的文字。返回替换的文字块数。"""
+def _translate_image(doc, page, im, client, model, lang_out, reader,
+                     src_is_cjk=True, tgt_is_cjk=False, min_conf=0.0):
+    """翻译单张嵌入图像中的文字。返回替换的文字块数。
+
+    src_is_cjk: 源语言是否中日韩(决定检测哪种文字)；
+    tgt_is_cjk: 目标语言是否中日韩(决定重绘用 CJK 字体)。"""
     import fitz
     from PIL import Image, ImageDraw
     import numpy as np
+
+    def _is_src(text):
+        # 源文字识别：CJK 源 -> 含 CJK；拉丁源(英文等) -> 含 >=2 个拉丁字母且不含 CJK。
+        if src_is_cjk:
+            return _has_cjk(text)
+        return (not _has_cjk(text)) and len(_LATIN_LETTER_RE.findall(text or "")) >= 2
 
     xref = im[0]
     smask = im[1]
@@ -166,17 +192,16 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
         iy = min(a[3], b[3]) - max(a[1], b[1])
         return ix > -6 and iy > 0  # 同一行且横向相邻/相交(留 6px 容差)
 
-    # 标记需要处理的检测：含 CJK -> 翻译；与 CJK 同行相邻的纯拉丁框 -> 并入该 CJK 框的
-    # 包围盒(其内容会被相邻 CJK 的译文覆盖，如标题前缀 "AI"；并入后统一抹除+重绘，避免
-    # 单独抹除把已绘译文打出空洞)；竖高窄的空/低置信框 -> 旋转重识别。
-    cjk_idx = [i for i, d in enumerate(dets) if _has_cjk(d[4]) and d[5] >= min_conf]
+    # 标记需要处理的检测：含源语言文字 -> 翻译；与之同行相邻、属于"另一种文字"的框
+    #  -> 并入源语言框的包围盒(其内容会被相邻译文覆盖，如标题里夹带的 "AI"；并入后统一
+    # 抹除+重绘，避免单独抹除把已绘译文打出空洞)；竖高窄的空/低置信框 -> 旋转重识别。
+    src_idx = [i for i, d in enumerate(dets) if _is_src(d[4]) and d[5] >= min_conf]
     merged = set()
     for j, d in enumerate(dets):
-        if j in cjk_idx or _has_cjk(d[4]):
+        if j in src_idx or _is_src(d[4]):
             continue
-        for i in cjk_idx:
+        for i in src_idx:
             if _overlap(d, dets[i]):
-                # 把拉丁框并入 CJK 框的包围盒
                 dets[i][0] = min(dets[i][0], d[0])
                 dets[i][1] = min(dets[i][1], d[1])
                 dets[i][2] = max(dets[i][2], d[2])
@@ -198,7 +223,7 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
         max_w = bw * 1.5
         size = bh + 2
         while size > 5:
-            f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
+            f = _font(size, cjk=tgt_is_cjk); tb = draw.textbbox((0, 0), eng, font=f)
             if tb[2] - tb[0] <= max_w and tb[3] - tb[1] <= bh * 1.25:
                 return size
             size -= 1
@@ -209,7 +234,7 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
         if vertical:
             bw, bh = bh, bw  # 文字按水平排版后再旋转，故宽高互换
         size = fixed_size if fixed_size else _fit_size(eng, bw, bh)
-        f = _font(size); tb = draw.textbbox((0, 0), eng, font=f)
+        f = _font(size, cjk=tgt_is_cjk); tb = draw.textbbox((0, 0), eng, font=f)
         tw, th = tb[2] - tb[0], tb[3] - tb[1]
         if vertical:
             # 在透明小图上水平绘制，再旋转 90° 贴回(竖排标签，如 Y 轴标题)
@@ -236,7 +261,7 @@ def _translate_image(doc, page, im, client, model, lang_out, reader, min_conf=0.
         is_vert = h > w * 1.3  # 竖高窄 -> 疑似竖排
         if i in merged:
             continue
-        if i not in cjk_idx and not (is_vert and not raw.strip()):
+        if i not in src_idx and not (is_vert and not raw.strip()):
             continue
         crop = hidpi.crop((max(0, HX0 - 10), max(0, HY0 - 10),
                            min(HW, HX1 + 10), min(HH, HY1 + 10)))
@@ -304,13 +329,16 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
                             api_key=None, base_url=None):
     """对 PDF 内所有嵌入图像翻译其源语言文字，原地保存。返回 (图像数, 替换块数)。
 
-    目前仅支持源语言为中日韩(CJK)的图像文字 + OpenAI 兼容的视觉模型。
+    支持 中日韩 <-> 英文 等方向(源与目标须为不同文字体系) + OpenAI 兼容的视觉模型。
     其它情况安全跳过(返回 0,0)。"""
     if service.split(":")[0] not in ("openai", "azure-openai"):
         print("⏭️  图像翻译目前仅支持 openai 视觉模型，已跳过 (--service openai)")
         return (0, 0)
-    if not _has_cjk_source(lang_in):
-        print("⏭️  图像翻译目前仅支持中日韩源语言，已跳过")
+    src_is_cjk = _lang_is_cjk(lang_in)
+    tgt_is_cjk = _lang_is_cjk(lang_out)
+    # 需要源/目标分属不同文字体系(CJK <-> 非 CJK)，否则无从判断哪些是源文字。
+    if src_is_cjk == tgt_is_cjk:
+        print("⏭️  图像翻译目前支持 中日韩↔英文 方向，当前语言组合已跳过")
         return (0, 0)
 
     try:
@@ -337,7 +365,8 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
         page = doc[pid]
         for im in page.get_images(full=True):
             try:
-                replaced = _translate_image(doc, page, im, client, model, lang_out, reader)
+                replaced = _translate_image(doc, page, im, client, model, lang_out, reader,
+                                            src_is_cjk=src_is_cjk, tgt_is_cjk=tgt_is_cjk)
             except Exception:
                 replaced = 0
             if replaced:
@@ -353,8 +382,8 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
     return (n_imgs, n_blocks)
 
 
-def _has_cjk_source(lang_in):
-    return str(lang_in).lower() in {
-        "zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "chinese",
+def _lang_is_cjk(lang):
+    return str(lang).lower() in {
+        "zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "zh-hans-cn", "chinese",
         "ja", "japanese", "ko", "korean",
     }

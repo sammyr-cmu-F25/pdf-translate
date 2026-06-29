@@ -128,19 +128,21 @@ bitmap (no text layer), so the normal pipeline can't reach them. Pass
 python pdf-translate.py input.pdf -li zh -lo en --service openai --translate-images
 ```
 
-Requirements: `--service openai` (uses GPT-4o vision), a CJK source language
-(zh/ja/ko), and `pip install easyocr`. It detects text regions with EasyOCR,
-transcribes+translates each with the vision model, erases the original pixels,
-and redraws the translation (color/size matched), preserving the image's
-transparency. Cost: an OCR model load plus one vision call per detected label.
+Requirements: `--service openai` (uses GPT-4o vision) and `pip install easyocr`.
+Works **both directions** — CJK↔English (zh/ja/ko ↔ en); source and target must
+differ in script. It detects text regions with EasyOCR, transcribes+translates
+each with the vision model, erases the original pixels, and redraws the
+translation (color/size matched, CJK-capable font when the target is Chinese/
+Japanese/Korean), preserving the image's transparency. Cost: an OCR model load
+plus one vision call per detected label.
 
 ## Known Limitations / 已知限制 / 既知の制限
 
 - Scanned PDFs (pure image-based) are not supported — use OCR first
 - Machine translation may need manual review for domain-specific terminology
 - Large files (>50 pages) may take longer
-- `--translate-images` covers CJK→other only; redrawn font is Arial (not the
-  chart's original font), and very dense legends may clip slightly
+- `--translate-images` covers CJK↔English; redrawn font is a system default
+  (not the chart's original font), and very dense legends may clip slightly
 
 ## License
 
