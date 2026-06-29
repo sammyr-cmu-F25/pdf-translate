@@ -109,11 +109,24 @@ _CJK_TARGETS = {"zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant", "ja", "ko",
 # 收集"漏译"片段(目标语言非 CJK 但译文仍含 CJK)，运行结束后统一提示。
 LEFTOVER_CJK = []
 
+# 拉丁字母，用于判断"已是英文等目标语言"的文本。
+_LATIN_PAT = re.compile(r"[A-Za-z]")
+
 
 def _cjk_ratio(s):
     cj = len(_CJK_PAT.findall(s))
     tot = len(re.sub(r"\s", "", s)) or 1
     return cj / tot
+
+
+def _already_target(text, lang_out):
+    """当目标语言非 CJK(如英文)时，判断 text 是否本就是目标语言：不含 CJK 且含足够
+    拉丁字母。这类文本(如已存在的英文副标题)应原样保留，避免被反向译回中文。"""
+    if str(lang_out).lower() in _CJK_TARGETS:
+        return False  # 目标是中日韩时不适用(英文应被翻译)
+    if _CJK_PAT.search(text):
+        return False  # 含 CJK -> 需要翻译
+    return len(_LATIN_PAT.findall(text)) >= 2  # 至少两个拉丁字母 -> 视为已是英文
 
 
 def _install_translate_guard():
@@ -133,6 +146,9 @@ def _install_translate_guard():
         if text is None:
             return text
         if not text.strip() or _NO_TRANSLATE_PAT.match(text):
+            return text
+        # 已是目标语言(如 zh→en 时遇到现成英文)：原样保留，不要反向译回源语言。
+        if _already_target(text, getattr(self, "lang_out", "")):
             return text
         out = orig_translate(self, text, ignore_cache)
         # 清理 LLM 对截断片段添加的元注释(如 "Note: The source text is incomplete…")，
