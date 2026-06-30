@@ -838,6 +838,13 @@ class TranslateConverter(PDFConverterEx):
                 page_right = ltpage.width - 56.0  # 估计右边距
                 if page_right - x0 > _wrap_avail:
                     _wrap_avail = page_right - x0
+            # PATCH#6d 防止正文/参考文献的译文压到同一行右侧"原样保留"的邻段(如参考
+            # 文献里保留的英文 URL)：把换行宽度收到"到右邻的间距"以内，使译文在碰到邻
+            # 段前换行，而不是覆盖它(严禁重叠)。仅当邻段确实更靠右且间距合理时生效。
+            if not in_fig:
+                _awr_b = _avail_width_right(id)
+                if _awr_b and _awr_b > 12 and _awr_b < _wrap_avail:
+                    _wrap_avail = _awr_b - 2
             elif in_fig and self.box_oracle is not None:
                 # 表格/图表单元格：按真实方框宽度换行(配合 PATCH#5 的多行字号估算)
                 try:
@@ -857,10 +864,12 @@ class TranslateConverter(PDFConverterEx):
                 _target = min(_natw + 2, max(_wrap_avail, _page_room))
                 if _target > _wrap_avail:
                     _wrap_avail = _target
-            # 是否需要换行：含空格(拉丁按单词换)，或含 CJK(中日韩可在任意字符间换行——
-            # 译文为中文等时没有空格，必须支持逐字换行，否则整行溢出列宽被裁切)。
+            # 是否需要换行：含空格(拉丁按单词换)、含 CJK(中日韩可在任意字符间换行)，或
+            # 文本自然宽度超过可用宽度(如无空格的长 URL，需要硬断行，否则溢出列宽并压到
+            # 相邻列的文字)。译文为中文等时没有空格，也必须逐字换行。
             _has_cjk_new = any(_char_is_cjk(ch) for ch in new)
-            if _wrap_avail > 1 and (" " in new.strip() or _has_cjk_new):
+            _too_wide = _measure_width(new, size) > _wrap_avail + 0.5
+            if _wrap_avail > 1 and (" " in new.strip() or _has_cjk_new or _too_wide):
                 avail = _wrap_avail
                 line_w = 0.0
                 last_space_ptr = None
@@ -908,6 +917,13 @@ class TranslateConverter(PDFConverterEx):
                         last_space_ptr = None
                     elif line_w + cw > avail and i > 0 and (_char_is_cjk(cc) or _char_is_cjk(new[i - 1])):
                         # CJK 可在此字符前换行(无空格)：在当前字符处断行
+                        wrap_breaks.add(i)
+                        line_w = cw
+                        seg_w_since_space = cw
+                        last_space_ptr = None
+                    elif line_w + cw > avail and i > 0 and seg_w_since_space + cw > avail:
+                        # 无空格的超长 token(如 URL)：单词本身已宽过整列，只能硬断字符，
+                        # 否则会溢出列宽压到相邻列(严禁重叠)。
                         wrap_breaks.add(i)
                         line_w = cw
                         seg_w_since_space = cw
