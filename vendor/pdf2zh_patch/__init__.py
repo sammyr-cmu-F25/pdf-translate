@@ -198,6 +198,15 @@ def _install_translate_guard():
 # one merged blob. Keyed by detection index i -> True.
 FIGURE_BOX_INDICES = {"value": set()}
 
+# Shared with the patched converter: bounding boxes (in PDF points, bottom-left
+# origin) of ROTATED text the converter detected and deliberately skipped (e.g.
+# landscape tables drawn sideways with dir=(0,-1)). pdf2zh's upright-only relayout
+# turns such text into garbage, so we drop it from translation and instead let the
+# --translate-images post-pass rasterize+OCR+translate those regions from the
+# ORIGINAL page. Keyed by pageid -> list of [x0, y0, x1, y1] (pdfminer coords,
+# y up from bottom). Reset per run.
+ROTATED_REGIONS = {}
+
 
 def _install_figure_unlock():
     """Wrap the layout model's predict() so protected regions (figure/table/

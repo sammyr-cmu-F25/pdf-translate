@@ -107,6 +107,43 @@ def _ocr_translate_crop(client, model, crop, lang_out):
     return eng or None
 
 
+def _batch_translate(client, model, texts, lang_out):
+    """一次性翻译一组短文本(用于旋转表格的整块)。逐项命中缓存，未命中的合并为一次
+    文本调用(非视觉)，比逐格视觉调用快得多。返回与 texts 等长的译文列表。"""
+    import json
+    results = [None] * len(texts)
+    todo = []  # (index, text)
+    for i, t in enumerate(texts):
+        c = _TRANS_CACHE.get(t.strip())
+        if c is not None:
+            results[i] = c
+        elif t.strip():
+            todo.append((i, t))
+    if todo:
+        numbered = "\n".join(f"{k}\t{t}" for k, (_, t) in enumerate(todo))
+        prompt = (
+            f"Translate each numbered line below to {lang_out}. These are cells of a "
+            f"table. Keep numbers, %, dates, codes, and symbols EXACTLY as written. "
+            f"Return JSON {{\"t\":[\"...\",...]}} with translations in the SAME order, "
+            f"same count. Output JSON only."
+            f"\n\n{numbered}"
+        )
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0, response_format={"type": "json_object"},
+            )
+            arr = json.loads(r.choices[0].message.content).get("t", [])
+        except Exception:
+            arr = []
+        for k, (i, t) in enumerate(todo):
+            eng = arr[k].strip() if k < len(arr) and isinstance(arr[k], str) else t
+            results[i] = eng
+            _TRANS_CACHE[t.strip()] = eng
+    return results
+
+
 def _text_color(arr, x0, y0, x1, y1):
     """方框内文字颜色：背景=不透明像素的中位色(占多数)；文字=离背景最远的那批像素的
     代表色。这样无论文字是黑/蓝/红/绿都能正确取到，且不会误取浅色背景或抗锯齿边缘。"""
@@ -326,11 +363,16 @@ def _translate_image(doc, page, im, client, model, lang_out, reader,
 
 
 def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
-                            api_key=None, base_url=None):
+                            api_key=None, base_url=None,
+                            orig_pdf_path=None, rotated_regions=None):
     """对 PDF 内所有嵌入图像翻译其源语言文字，原地保存。返回 (图像数, 替换块数)。
 
     支持 中日韩 <-> 英文 等方向(源与目标须为不同文字体系) + OpenAI 兼容的视觉模型。
-    其它情况安全跳过(返回 0,0)。"""
+    其它情况安全跳过(返回 0,0)。
+
+    orig_pdf_path/rotated_regions: 若提供，则同时翻译"旋转文字区域"(如横放表格)——
+    这些文字已在转换阶段被跳过(否则会被直立重排成乱码)，此处从原始页面光栅化后
+    OCR+翻译并叠加到输出页面。rotated_regions: {pageid: [(x0,y0,x1,y1)...]}。"""
     if service.split(":")[0] not in ("openai", "azure-openai"):
         print("⏭️  图像翻译目前仅支持 openai 视觉模型，已跳过 (--service openai)")
         return (0, 0)
@@ -359,6 +401,12 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
     )
 
     doc = fitz.open(pdf_path)
+    orig_doc = None
+    if orig_pdf_path and rotated_regions:
+        try:
+            orig_doc = fitz.open(orig_pdf_path)
+        except Exception:
+            orig_doc = None
     n_imgs = 0
     n_blocks = 0
     for pid in range(doc.page_count):
@@ -372,6 +420,19 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
             if replaced:
                 n_imgs += 1
                 n_blocks += replaced
+        # 旋转文字区域(横放表格等)：从原始页面光栅化后翻译并叠加。
+        if orig_doc is not None and rotated_regions.get(pid):
+            try:
+                rb = _translate_rotated_on_page(
+                    orig_doc[pid], page, rotated_regions[pid], client, model,
+                    lang_out, reader, src_is_cjk=src_is_cjk, tgt_is_cjk=tgt_is_cjk)
+            except Exception:
+                rb = 0
+            if rb:
+                n_imgs += 1
+                n_blocks += rb
+    if orig_doc is not None:
+        orig_doc.close()
     if n_blocks:
         tmp = pdf_path + ".imgtmp.pdf"
         doc.save(tmp, garbage=4, deflate=True)
@@ -380,6 +441,115 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
     else:
         doc.close()
     return (n_imgs, n_blocks)
+
+
+def _cluster_boxes(boxes, gap=6.0):
+    """把许多字符级包围盒合并成若干"块"(简单的并查/外扩合并)。boxes: (x0,y0,x1,y1)。
+    返回合并后的块包围盒列表。用于把旋转表格的零散字符聚成可处理的区域。"""
+    rects = [list(b) for b in boxes]
+    changed = True
+    while changed and len(rects) > 1:
+        changed = False
+        out = []
+        for r in rects:
+            merged_into = None
+            for o in out:
+                # 外扩 gap 后相交即合并
+                if (r[0] <= o[2] + gap and r[2] >= o[0] - gap and
+                        r[1] <= o[3] + gap and r[3] >= o[1] - gap):
+                    o[0] = min(o[0], r[0]); o[1] = min(o[1], r[1])
+                    o[2] = max(o[2], r[2]); o[3] = max(o[3], r[3])
+                    merged_into = o; changed = True; break
+            if merged_into is None:
+                out.append(r[:])
+        rects = out
+    return rects
+
+
+def _translate_rotated_on_page(orig_page, out_page, char_boxes, client, model,
+                               lang_out, reader, src_is_cjk, tgt_is_cjk):
+    """翻译某页"旋转文字"区域：从原始页面光栅化每个块，按旋转后水平方向 OCR+翻译，
+    再把译文(旋转回原方向)叠加到输出页面。返回处理的文本块数。"""
+    import fitz
+    from PIL import Image, ImageDraw
+    import numpy as np
+
+    PH = orig_page.rect.height
+    # 字符盒(pdfminer 坐标, y 自下而上) -> PyMuPDF 坐标(y 自上而下)
+    boxes_tl = [(x0, PH - y1, x1, PH - y0) for (x0, y0, x1, y1) in char_boxes]
+    blocks = _cluster_boxes(boxes_tl, gap=8.0)
+    # 仅保留足够大的块(过滤零散噪声)
+    blocks = [b for b in blocks if (b[2] - b[0]) > 30 and (b[3] - b[1]) > 30]
+    if not blocks:
+        return 0
+
+    n = 0
+    for bx0, by0, bx1, by1 in blocks:
+        rect = fitz.Rect(bx0, by0, bx1, by1)
+        zoom = 4.0
+        hp = orig_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect)
+        crop = Image.frombytes("RGB", [hp.width, hp.height], hp.samples)
+        # 该块文字是顺时针旋转 90°(dir=(0,-1))写的，旋转 +90° 使其水平以便 OCR。
+        upright = crop.rotate(-90, expand=True)
+        arr = np.array(upright)
+        try:
+            res = reader.readtext(arr, detail=1)
+        except Exception:
+            res = []
+        UW, UH = upright.size
+        # 收集该块所有源文字框，一次性批量翻译(每块 1 次 LLM 调用，避免逐格调用过慢)。
+        raw_items = []
+        for box, raw, conf in res:
+            if not _src_text(raw, src_is_cjk):
+                continue
+            xs = [p[0] for p in box]; ys = [p[1] for p in box]
+            raw_items.append((min(xs), min(ys), max(xs), max(ys), raw.strip()))
+        if not raw_items:
+            continue
+        texts = [it[4] for it in raw_items]
+        trans = _batch_translate(client, model, texts, lang_out)
+        items = []
+        for (ux0, uy0, ux1, uy1, raw), eng in zip(raw_items, trans):
+            if eng:
+                items.append((ux0, uy0, ux1, uy1, eng))
+        if not items:
+            continue
+
+        # 把译文画到一张 upright 画布上(白底→后续旋转回去叠加)，逐块用透明底以便旋转贴回。
+        tile = Image.new("RGBA", (UW, UH), (0, 0, 0, 0))
+        td = ImageDraw.Draw(tile)
+        # 先在 upright 上把原文区域抹白(覆盖原英文)，再写译文。
+        cover = Image.new("RGBA", (UW, UH), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(cover)
+        for ux0, uy0, ux1, uy1, eng in items:
+            cd.rectangle([ux0 - 2, uy0 - 2, ux1 + 2, uy1 + 2], fill=(255, 255, 255, 255))
+            bh = uy1 - uy0
+            size = max(6, int(bh) + 1)
+            while size > 5:
+                f = _font(size, cjk=tgt_is_cjk); tb = td.textbbox((0, 0), eng, font=f)
+                if tb[2] - tb[0] <= (ux1 - ux0) * 1.6 and tb[3] - tb[1] <= bh * 1.3:
+                    break
+                size -= 1
+            f = _font(size, cjk=tgt_is_cjk); tb = td.textbbox((0, 0), eng, font=f)
+            td.text((ux0 - tb[0], uy0 + (bh - (tb[3] - tb[1])) // 2 - tb[1]), eng,
+                    font=f, fill=(20, 20, 20, 255))
+        # 合成：白底覆盖 + 译文，再旋转回 -90°(即顺时针 90°)对齐原方向
+        merged = Image.alpha_composite(cover, tile)
+        back = merged.rotate(90, expand=True)
+        # 贴回输出页面对应矩形(insert_image 接受 PNG 流，铺满该 rect)
+        buf = io.BytesIO(); back.save(buf, format="PNG")
+        try:
+            out_page.insert_image(rect, stream=buf.getvalue(), overlay=True)
+            n += len(items)
+        except Exception:
+            pass
+    return n
+
+
+def _src_text(text, src_is_cjk):
+    if src_is_cjk:
+        return _has_cjk(text)
+    return (not _has_cjk(text)) and len(_LATIN_LETTER_RE.findall(text or "")) >= 2
 
 
 def _lang_is_cjk(lang):

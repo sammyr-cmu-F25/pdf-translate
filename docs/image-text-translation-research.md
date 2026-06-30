@@ -119,6 +119,28 @@ all bars/line/numbers intact, Chinese gone.
 - Some embedded images are low-res; upscaling can't recover lost detail.
 - Numbers/years should be skipped (already numeric).
 
+## Rotated text (landscape tables) — durable fix
+
+Pages with landscape tables draw text rotated 90° (pdfminer line `dir=(0,-1)`,
+char matrix `[0,b,c,0]`). pdf2zh's upright-only relayout turns this into
+per-character vertical garbage (and misclassifies it as formula). Root-cause fix,
+generalized so the whole class is handled:
+
+1. **Converter (PATCH#8)**: detect chars whose matrix is rotated
+   (`|m[0]|,|m[3]|≈0` and `|m[1]| or |m[2]|>0`); skip them entirely (don't
+   translate, don't re-emit) and record their bboxes in
+   `pdf2zh_patch.ROTATED_REGIONS[pageid]`. This alone removes the garbage.
+2. **Image post-pass**: for each page, cluster the rotated char bboxes into
+   blocks, rasterize each block from the ORIGINAL page, rotate to upright, OCR
+   with EasyOCR, **batch-translate all cell texts in ONE LLM call**
+   (`_batch_translate`, JSON list — NOT one vision call per cell, which timed
+   out at 10 min), then draw the translations onto a tile, rotate back, and
+   `insert_image` onto the output page. ~59s for this paper's 3 table pages.
+   Applied to the **mono** output only (dual's two-column geometry differs).
+
+Result: pages 4–6 landscape tables render as readable rotated Chinese instead of
+scrambled vertical garbage.
+
 ## Decision
 
 Full pipeline is VALIDATED (Findings 1–5) and produces a correct translated

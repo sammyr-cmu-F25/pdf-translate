@@ -199,8 +199,10 @@ class TranslateConverter(PDFConverterEx):
         try:
             import pdf2zh_patch as _pp
             _figure_region_ids = _pp.FIGURE_BOX_INDICES.get("value", set())
+            _ROTATED_REGIONS = _pp.ROTATED_REGIONS  # PATCH#8 旋转文字区域收集
         except Exception:
             _figure_region_ids = set()
+            _ROTATED_REGIONS = {}
         # 段落
         sstk: list[str] = []            # 段落文字栈
         pstk: list[Paragraph] = []      # 段落属性栈
@@ -268,6 +270,18 @@ class TranslateConverter(PDFConverterEx):
         for child in ltpage:
             if isinstance(child, LTChar):
                 cur_v = False
+                # PATCH#8 旋转文字(横排矩阵被旋转，如横放的表格 dir=(0,±1))：pdf2zh 的
+                # 直立排版会把它重排成逐字竖排的乱码。这里直接跳过这些字符(不翻译、不重
+                # 绘)，并把其包围盒记入 ROTATED_REGIONS，交由 --translate-images 后处理
+                # 从原始页面光栅化+OCR+翻译。这样根治"竖排表格变乱码"的整类问题。
+                _m = child.matrix
+                if abs(_m[0]) < 1e-3 and abs(_m[3]) < 1e-3 and (abs(_m[1]) > 1e-3 or abs(_m[2]) > 1e-3):
+                    try:
+                        _rot = _ROTATED_REGIONS.setdefault(ltpage.pageid, [])
+                        _rot.append((child.x0, child.y0, child.x1, child.y1))
+                    except Exception:
+                        pass
+                    continue  # 不纳入翻译/重排
                 layout = self.layout[ltpage.pageid]
                 # ltpage.height 可能是 fig 里面的高度，这里统一用 layout.shape
                 h, w = layout.shape

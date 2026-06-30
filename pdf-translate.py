@@ -83,6 +83,11 @@ def main():
         import pdf2zh_patch
         translate_figures = not args.protect_figures
         pdf2zh_patch.patch(translate_figures=translate_figures)
+        # 每次运行前清空旋转文字区域收集(模块级全局)。
+        try:
+            pdf2zh_patch.ROTATED_REGIONS.clear()
+        except Exception:
+            pass
         extra = "" if not translate_figures else " + 翻译图表内文字(#2)"
         print(f"🩹 已加载增强补丁: 颜色匹配(#1) + 自适应字号(#3){extra}")
 
@@ -153,15 +158,26 @@ def main():
             translate_images_in_pdf = None
         if translate_images_in_pdf is not None:
             chosen_model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+            # 转换阶段收集到的"旋转文字区域"(横放表格等)，交给图像后处理从原始页面翻译。
+            try:
+                import pdf2zh_patch
+                rotated = dict(getattr(pdf2zh_patch, "ROTATED_REGIONS", {}) or {})
+            except Exception:
+                rotated = {}
+            orig_path = os.path.abspath(args.input)
             for suffix in ("mono", "dual"):
                 if suffix not in out_paths:
                     continue
                 print(f"🖼️  翻译图像内文字: {os.path.basename(out_paths[suffix])} …")
+                # 旋转区域坐标基于原始页面，仅 mono 版几何与原始一致；dual 版双栏排布
+                # 几何不同，旋转区域翻译只用于 mono。
+                _rot = rotated if suffix == "mono" else None
                 imgs, blocks = translate_images_in_pdf(
                     out_paths[suffix], args.lang_in, args.lang_out,
-                    args.service, chosen_model)
+                    args.service, chosen_model,
+                    orig_pdf_path=orig_path, rotated_regions=_rot)
                 if blocks:
-                    print(f"   ✅ 替换了 {blocks} 处图像文字(涉及 {imgs} 张图)")
+                    print(f"   ✅ 替换了 {blocks} 处图像文字(涉及 {imgs} 张图/区域)")
                 else:
                     print("   (未发现可翻译的图像文字)")
 
