@@ -27,4 +27,13 @@ if [ ! -x "$PY" ]; then
   exit 1
 fi
 
+# Set OpenMP / threading env BEFORE Python starts, so onnxruntime & torch load
+# with a single, non-duplicated libomp. This avoids the macOS teardown segfault
+# that can otherwise kill the run after translation but before the PDF is saved.
+export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export ORT_DISABLE_THREAD_POOL_SPINNING="${ORT_DISABLE_THREAD_POOL_SPINNING:-1}"
+
 exec "$PY" "$DIR/pdf-translate.py" "$@"

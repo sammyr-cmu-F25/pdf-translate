@@ -56,11 +56,16 @@ def main():
                              "By default this tool translates that text too (math formulas always preserved).")
     parser.add_argument("--fresh", action="store_true",
                         help="Ignore the translation cache and re-translate everything from scratch.")
-    parser.add_argument("--translate-images", action="store_true",
-                        help="Also translate text baked into chart/figure bitmaps (OCR + redraw). "
-                             "Requires --service openai; works CJK<->English (source and target "
-                             "must differ in script); needs easyocr. "
-                             "Adds an OCR model load + a vision call per detected label.")
+    # 图像内文字翻译：默认开启(随 --service openai 自动进行)。用 --no-translate-images
+    # 关闭以获得更快的纯文本翻译。--translate-images 保留为显式开启(向后兼容)。
+    parser.add_argument("--translate-images", dest="translate_images",
+                        action="store_true", default=True,
+                        help="Translate text baked into chart/figure bitmaps/vectors "
+                             "(OCR + redraw). ON by default for --service openai.")
+    parser.add_argument("--no-translate-images", dest="translate_images",
+                        action="store_false",
+                        help="Skip chart/figure text translation for a faster, "
+                             "text-only run.")
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -149,8 +154,10 @@ def main():
             size = os.path.getsize(path) // 1024
             print(f"✅ {label}: {path} ({size} KB)")
 
-    # 图像内文字翻译(后处理)：翻译图表位图中烧录的源语言文字。
-    if args.translate_images and not args.no_patch:
+    # 图像内文字翻译(后处理)：翻译图表位图/矢量中烧录的文字。默认开启，但仅在使用
+    # OpenAI 视觉模型时才有意义(其它服务不支持图像翻译，自动跳过且不打扰)。
+    _img_ok = args.translate_images and not args.no_patch and _service_base in ("openai", "azure-openai")
+    if _img_ok:
         try:
             from pdf2zh_patch.image_translate import translate_images_in_pdf
         except Exception as e:
@@ -180,6 +187,10 @@ def main():
                     print(f"   ✅ 替换了 {blocks} 处图像文字(涉及 {imgs} 张图/区域)")
                 else:
                     print("   (未发现可翻译的图像文字)")
+    elif (args.translate_images and not args.no_patch
+          and _service_base not in ("openai", "azure-openai")):
+        # 默认想翻译图像，但当前服务不支持 -> 友好提示(不报错)。
+        print("ℹ️  图表/图像内文字翻译需要 --service openai（当前服务已跳过该步骤）")
 
     # 漏译提示：当目标语言非中日韩时，扫描输出 PDF，列出仍残留中日韩字符的文字
     # (无论来自翻译漏译还是排版残留)，便于人工复核。图表内的位图文字无法检出，
@@ -231,4 +242,12 @@ def _scan_leftover_cjk(mono_path):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _rc = main()
+    # macOS 上 ONNXRuntime/PyTorch 的 libomp 在解释器正常退出(teardown)时常触发段错误，
+    # 此时所有工作(翻译+写盘+提示)已完成。用 os._exit 跳过有问题的析构流程，确保进程
+    # 干净退出、输出不丢失。先刷新缓冲区。
+    try:
+        sys.stdout.flush(); sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(int(_rc or 0))

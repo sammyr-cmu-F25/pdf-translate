@@ -61,11 +61,44 @@ def patch(translate_figures=True):
 
     _install_color_oracle(hl)
     _install_translate_guard()
+    _install_onnx_singlethread()
 
     if translate_figures:
         _install_figure_unlock()
 
     return True
+
+
+def _install_onnx_singlethread():
+    """强制 onnxruntime 推理会话单线程、顺序执行，并关闭线程池自旋。doclayout 的 ONNX
+    会话默认会拉起多线程 OpenMP 线程池，在 macOS 上(ONNX 与 torch 各带一份 libomp)
+    退出时常触发段错误，导致已完成的翻译还没写盘进程就崩溃。固定为单线程可消除该崩溃，
+    对本工具(单张版面图小模型)几乎无速度影响。幂等。"""
+    try:
+        import onnxruntime as ort
+    except Exception:
+        return
+    if getattr(ort, "_pdf2zh_singlethread", False):
+        return
+    _orig = ort.InferenceSession
+
+    class _SingleThreadSession(_orig):
+        def __init__(self, *a, **k):
+            if "sess_options" not in k and len(a) < 2:
+                so = ort.SessionOptions()
+                so.intra_op_num_threads = 1
+                so.inter_op_num_threads = 1
+                so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                try:
+                    so.add_session_config_entry(
+                        "session.intra_op.allow_spinning", "0")
+                except Exception:
+                    pass
+                k["sess_options"] = so
+            super().__init__(*a, **k)
+
+    ort.InferenceSession = _SingleThreadSession
+    ort._pdf2zh_singlethread = True
 
 
 # PATCH#7 译文净化：LLM 类服务(OpenAI 等)在收到"空白/纯数字/纯符号"等无需翻译的

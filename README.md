@@ -53,7 +53,7 @@ translate ~/Downloads/paper.pdf -li en -lo zh --service openai
 | `--service` | `google` (free), `openai`, `deepl`, `ollama` | `google` |
 | `-m, --model` | LLM model (OpenAI) | `gpt-4o` |
 | `-o`   | output directory | next to input |
-| `--translate-images` | also translate text inside charts/figures (see below) | off |
+| `--no-translate-images` | skip chart/figure text translation (faster) | off (charts ON for openai) |
 | `--fresh` | ignore the translation cache, re-translate everything | off |
 | `-t`   | worker threads | `4` |
 
@@ -77,20 +77,27 @@ echo 'export OPENAI_API_KEY="sk-..."' >> ~/.zshrc && source ~/.zshrc
 ## Translating text inside charts / figures
 
 Chart titles, axis labels, and legends are often **not real text** — they're
-baked into a bitmap or drawn as vector outlines, so the normal pipeline can't
-reach them. Add `--translate-images`:
+baked into a bitmap or drawn as vector outlines, so a plain text pipeline can't
+reach them. This is handled **automatically** whenever you use `--service openai`:
 
 ```bash
-./translate ~/Downloads/report.pdf -li zh -lo en --service openai --translate-images
+./translate ~/Downloads/report.pdf -li zh -lo en --service openai
 ```
 
 It detects text in figures (EasyOCR), translates it (GPT-4o vision), and redraws
 it in place — handling **bitmap charts, vector-drawn labels, and rotated /
 landscape tables**, in both directions (CJK ↔ English).
 
-Requires `--service openai` and a one-time `pip install easyocr` (into the
-project venv: `.venv/bin/pip install easyocr`). It adds an OCR pass plus a few
-vision calls per figure, so it's slower than text-only translation.
+For a **faster, text-only** run (skip charts), add `--no-translate-images`:
+
+```bash
+./translate ~/Downloads/report.pdf -li zh -lo en --service openai --no-translate-images
+```
+
+Chart translation only runs with `--service openai` (it needs the vision model);
+free services like `google` translate the text layer only. It needs a one-time
+`.venv/bin/pip install easyocr`, and adds an OCR pass plus a few vision calls per
+figure, so it's slower than text-only.
 
 ---
 
