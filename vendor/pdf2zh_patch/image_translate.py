@@ -402,11 +402,12 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
 
     doc = fitz.open(pdf_path)
     orig_doc = None
-    if orig_pdf_path and rotated_regions:
+    if orig_pdf_path:
         try:
             orig_doc = fitz.open(orig_pdf_path)
         except Exception:
             orig_doc = None
+    rotated_regions = rotated_regions or {}
     n_imgs = 0
     n_blocks = 0
     for pid in range(doc.page_count):
@@ -431,6 +432,24 @@ def translate_images_in_pdf(pdf_path, lang_in, lang_out, service, model,
             if rb:
                 n_imgs += 1
                 n_blocks += rb
+        # 矢量图表中的文字标签(无文本层、非位图，如饼图/散点图的类目名)：从原始页面
+        # 光栅化整页，OCR 出"文本层未覆盖"的文字并翻译叠加。根治矢量图标签漏译。
+        # 由页面矢量图形数量门控(见函数内)；旋转表格页(以旋转文字为主)交给旋转区域
+        # 处理，这里跳过以免重复。
+        # 仅当该页旋转字符极多(真正的整页横排表格，>=800)才认定"旋转为主"并交给旋转
+        # 区域处理；像页眉/侧边水印那种几百个零散旋转字不算(它们聚类后是细条会被旋转
+        # 块过滤掉)，仍允许矢量图标签翻译。
+        _rot_heavy = len(rotated_regions.get(pid, [])) >= 800
+        if orig_doc is not None and not _rot_heavy:
+            try:
+                ub = _translate_uncovered_on_page(
+                    orig_doc[pid], page, client, model, lang_out, reader,
+                    src_is_cjk=src_is_cjk, tgt_is_cjk=tgt_is_cjk)
+            except Exception:
+                ub = 0
+            if ub:
+                n_imgs += 1
+                n_blocks += ub
     if orig_doc is not None:
         orig_doc.close()
     if n_blocks:
@@ -541,6 +560,100 @@ def _translate_rotated_on_page(orig_page, out_page, char_boxes, client, model,
         try:
             out_page.insert_image(rect, stream=buf.getvalue(), overlay=True)
             n += len(items)
+        except Exception:
+            pass
+    return n
+
+
+def _translate_uncovered_on_page(orig_page, out_page, client, model, lang_out,
+                                 reader, src_is_cjk, tgt_is_cjk):
+    """翻译"文本层未覆盖"的页面文字——主要是矢量图表里以路径/轮廓绘制的标签(饼图、
+    散点图的类目名等)，它们既不在文本层、也不是位图，常规管线无法触及。做法：光栅化
+    原始整页，OCR，丢弃与原始文本层重叠的框(那些已由文本管线翻译)，其余源语言文字
+    批量翻译后叠加到输出页面。返回叠加的文本块数。"""
+    import fitz
+    from PIL import Image, ImageDraw
+    import numpy as np
+
+    # 性能门控：仅对"含较多矢量图形"的页面做整页 OCR(矢量图表才会有路径绘制的文字
+    # 标签)。纯文字页没有这类标签，跳过以省时省钱。
+    try:
+        if len(orig_page.get_drawings()) < 100:
+            return 0
+    except Exception:
+        pass
+
+    # 原始文本层 span 包围盒(PyMuPDF 坐标)，用于排除已翻译文字。
+    covered = []
+    for b in orig_page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            for s in l.get("spans", []):
+                if s["text"].strip():
+                    covered.append(s["bbox"])
+
+    zoom = 3.0
+    hp = orig_page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    img = Image.frombytes("RGB", [hp.width, hp.height], hp.samples)
+    try:
+        res = reader.readtext(np.array(img), detail=1)
+    except Exception:
+        return 0
+
+    def _covered(px0, py0, px1, py1):
+        # OCR 框(页面点坐标)是否与某文本层 span 明显重叠 -> 已翻译，跳过。
+        for cx0, cy0, cx1, cy1 in covered:
+            ix = min(px1, cx1) - max(px0, cx0)
+            iy = min(py1, cy1) - max(py0, cy0)
+            if ix > 0 and iy > 0:
+                a = (px1 - px0) * (py1 - py0) or 1
+                if (ix * iy) / a > 0.3:
+                    return True
+        return False
+
+    cand = []  # (px0,py0,px1,py1, raw) in page points
+    for box, raw, conf in res:
+        if conf < 0.3 or not _src_text(raw, src_is_cjk):
+            continue
+        xs = [p[0] for p in box]; ys = [p[1] for p in box]
+        px0, py0, px1, py1 = min(xs) / zoom, min(ys) / zoom, max(xs) / zoom, max(ys) / zoom
+        if _covered(px0, py0, px1, py1):
+            continue  # 已由文本层翻译
+        cand.append((px0, py0, px1, py1, raw.strip()))
+    if not cand:
+        return 0
+
+    trans = _batch_translate(client, model, [c[4] for c in cand], lang_out)
+    n = 0
+    for (px0, py0, px1, py1, raw), eng in zip(cand, trans):
+        if not eng:
+            continue
+        rect = fitz.Rect(px0 - 1, py0 - 1, px1 + 1, py1 + 1)
+        bw = (px1 - px0); bh = (py1 - py0)
+        # 在小图块上：背景采样填充(遮住原英文) + 居中绘制译文，再贴回。
+        scale = 3.0
+        tile = Image.new("RGBA", (max(4, int(bw * scale)), max(4, int(bh * scale))), (0, 0, 0, 0))
+        # 用原始该处的背景色填充(取块四角的中位色近似背景)
+        samp = orig_page.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=rect)
+        simg = Image.frombytes("RGB", [samp.width, samp.height], samp.samples)
+        arr = np.array(simg).reshape(-1, 3)
+        bg = tuple(int(v) for v in np.median(arr, axis=0))
+        td = ImageDraw.Draw(tile)
+        td.rectangle([0, 0, tile.width, tile.height], fill=bg + (255,))
+        # 字号自适应
+        size = max(6, int(bh * scale))
+        while size > 5:
+            f = _font(size, cjk=tgt_is_cjk); tb = td.textbbox((0, 0), eng, font=f)
+            if tb[2] - tb[0] <= tile.width * 1.05 and tb[3] - tb[1] <= tile.height * 1.1:
+                break
+            size -= 1
+        f = _font(size, cjk=tgt_is_cjk); tb = td.textbbox((0, 0), eng, font=f)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        td.text(((tile.width - tw) // 2 - tb[0], (tile.height - th) // 2 - tb[1]), eng,
+                font=f, fill=(20, 20, 20, 255))
+        buf = io.BytesIO(); tile.save(buf, format="PNG")
+        try:
+            out_page.insert_image(rect, stream=buf.getvalue(), overlay=True)
+            n += 1
         except Exception:
             pass
     return n

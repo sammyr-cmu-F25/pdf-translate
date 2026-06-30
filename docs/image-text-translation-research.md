@@ -1,4 +1,5 @@
 
+
 # Research: Translating Chinese text baked into chart/figure images
 
 Status: research notes (2026-06-29). Not yet implemented in the pipeline.
@@ -140,6 +141,26 @@ generalized so the whole class is handled:
 
 Result: pages 4–6 landscape tables render as readable rotated Chinese instead of
 scrambled vertical garbage.
+
+## Vector-figure labels (no text layer, not a bitmap) — durable catch-all
+
+Some figures (pie/scatter charts) draw their labels as **vector paths/outlined
+glyphs**, so the text is neither in the PDF text layer NOR in an embedded bitmap.
+Neither the text pipeline nor the image-xref pass touches them (e.g. Sakigake
+paper page 7: 223 vector drawings, labels "Oncology/Neurology/..." absent from
+text layer). General fix — a "translate uncovered text" pass:
+
+- For pages with many vector drawings (gate: `get_drawings() >= 100`, skips
+  text-only and watermark-only pages), rasterize the ORIGINAL page, OCR it.
+- Drop any OCR box that overlaps a text-layer span (already translated).
+- Batch-translate the remaining source-language boxes (one LLM call) and overlay
+  each onto the output page (background-sampled fill + redrawn translation).
+- Skip pages dominated by rotated text (`>=800` rotated chars → handled by the
+  rotated pass); footer/sidebar watermark rotation (~hundreds) does NOT count.
+
+This is the most general safety net: it translates page text regardless of how
+it's drawn (vector, bitmap, or path), as long as the text layer doesn't already
+cover it. Validated on Sakigake p7: pie/scatter labels → Chinese.
 
 ## Decision
 
