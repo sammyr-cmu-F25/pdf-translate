@@ -1,149 +1,123 @@
-# pdf-translate-skill
+# pdf-translate
 
-[English](#english) | [中文](#中文) | [日本語](#日本語)
+Translate a PDF into another language while **preserving the original layout** —
+two-column text, tables, charts, vector graphics, and formatting all stay in
+place. Outputs a translated-only PDF and a bilingual (side-by-side) PDF.
+
+Built on [PDFMathTranslate (pdf2zh)](https://github.com/Byaidu/PDFMathTranslate)
+with extra fixes for color matching, adaptive font sizing, CJK line wrapping,
+rotated/landscape tables, and translating text baked into charts/figures.
 
 ---
 
-## English
+## One-line usage
 
-### Translate PDFs in Claude Code — Layout Preserved
-
-A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) custom skill that translates PDF files into another language while **preserving the original layout, vector graphics, tables, and formatting**.
-
-Powered by [PDFMathTranslate (pdf2zh)](https://github.com/Byaidu/PDFMathTranslate).
-
-**Features:**
-- Preserves original two-column layout, tables, charts, and vector graphics
-- Outputs both a translated-only version (`-mono.pdf`) and a bilingual version (`-dual.pdf`)
-- Supports 8+ languages (English, Chinese, Japanese, Korean, French, German, Spanish, Russian)
-- Supports multiple translation services: Google (free), DeepL, OpenAI, Ollama (local)
-- Auto-detects and installs dependencies (Python 3.10+, pdf2zh)
-
-**Quick Start:**
+From a terminal, point the `translate` command at any PDF:
 
 ```bash
-# 1. Install the skill
-git clone https://github.com/yinsang0910-star/pdf-translate-skill.git
-cp pdf-translate-skill/pdf-translate.md ~/.claude/skills/
-cp pdf-translate-skill/pdf-translate.py ~/.claude/skills/
+# English → Chinese (uses OpenAI / GPT-4o — best quality)
+./translate ~/Downloads/paper.pdf -li en -lo zh --service openai
 
-# 2. Install pdf2zh
-pip install pdf2zh
+# Chinese → English
+./translate ~/Downloads/报告.pdf -li zh -lo en --service openai
 
-# 3. Use in Claude Code
-/pdf-translate /path/to/document.pdf
+# Free, no API key (Google Translate)
+./translate ~/Downloads/paper.pdf -li en -lo zh
+```
+
+Outputs land next to the input (or in `-o <dir>`):
+
+- `paper-mono.pdf`  — translated only
+- `paper-dual.pdf`  — original + translation side by side
+
+The `./translate` wrapper uses the project's bundled virtualenv automatically —
+**no `source .venv/bin/activate` needed.**
+
+### Run it from anywhere (optional)
+
+Add it to your PATH once, then call `translate` from any folder:
+
+```bash
+ln -s "$PWD/translate" /usr/local/bin/translate     # run this from the project dir
+translate ~/Downloads/paper.pdf -li en -lo zh --service openai
 ```
 
 ---
 
-## 中文
+## Common options
 
-### 在 Claude Code 中翻译 PDF —— 完整保留排版
+| Option | Meaning | Default |
+|--------|---------|---------|
+| `-li`  | source language (`en`, `zh`, `ja`, `ko`, …) | `en` |
+| `-lo`  | target language | `zh` |
+| `--service` | `google` (free), `openai`, `deepl`, `ollama` | `google` |
+| `-m, --model` | LLM model (OpenAI) | `gpt-4o` |
+| `-o`   | output directory | next to input |
+| `--translate-images` | also translate text inside charts/figures (see below) | off |
+| `--fresh` | ignore the translation cache, re-translate everything | off |
+| `-t`   | worker threads | `4` |
 
-一个 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 自定义技能，可将 PDF 文件翻译为另一种语言，同时**完整保留原始排版、矢量图形、表格和格式**。
+### Translation services
 
-基于 [PDFMathTranslate (pdf2zh)](https://github.com/Byaidu/PDFMathTranslate)。
-
-**功能特性：**
-- 保留原始两栏布局、表格、图表和矢量图形
-- 同时输出纯翻译版（`-mono.pdf`）和双语对照版（`-dual.pdf`）
-- 支持 8+ 种语言（英语、中文、日语、韩语、法语、德语、西班牙语、俄语）
-- 支持多种翻译服务：Google（免费）、DeepL、OpenAI、Ollama（本地）
-- 自动检测并安装依赖（Python 3.10+、pdf2zh）
-
-**快速开始：**
-
-```bash
-# 1. 安装技能
-git clone https://github.com/yinsang0910-star/pdf-translate-skill.git
-cp pdf-translate-skill/pdf-translate.md ~/.claude/skills/
-cp pdf-translate-skill/pdf-translate.py ~/.claude/skills/
-
-# 2. 安装 pdf2zh
-pip install pdf2zh
-
-# 3. 在 Claude Code 中使用
-/pdf-translate /path/to/document.pdf
-```
-
----
-
-## 日本語
-
-### Claude Code で PDF を翻訳 — レイアウトを保持
-
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) のカスタムスキル。PDFファイルを別言語に翻訳し、**元のレイアウト・ベクトルグラフィック・表・フォーマットをそのまま保持**します。
-
-[PDFMathTranslate (pdf2zh)](https://github.com/Byaidu/PDFMathTranslate) により動作します。
-
-**機能：**
-- 元の2段組みレイアウト・表・チャート・ベクトルグラフィックを保持
-- 翻訳のみ版（`-mono.pdf`）とバイリンガル版（`-dual.pdf`）を同時出力
-- 8以上の言語対応（英語、中国語、日本語、韓国語、フランス語、ドイツ語、スペイン語、ロシア語）
-- 複数の翻訳サービスに対応：Google（無料）、DeepL、OpenAI、Ollama（ローカル）
-- 依存関係の自動検出・インストール（Python 3.10+、pdf2zh）
-
-**クイックスタート：**
-
-```bash
-# 1. スキルをインストール
-git clone https://github.com/yinsang0910-star/pdf-translate-skill.git
-cp pdf-translate-skill/pdf-translate.md ~/.claude/skills/
-cp pdf-translate-skill/pdf-translate.py ~/.claude/skills/
-
-# 2. pdf2zh をインストール
-pip install pdf2zh
-
-# 3. Claude Code で使用
-/pdf-translate /path/to/document.pdf
-```
-
----
-
-## Supported Translation Services / 支持的翻译服务 / 対応翻訳サービス
-
-| Service | Flag | API Key | Quality |
+| Service | Flag | API key | Quality |
 |---------|------|---------|---------|
-| Google Translate | `--service google` | No (free) | ★★★ |
-| DeepL | `--service deepl` | `DEEPL_AUTH_KEY` | ★★★★ |
-| OpenAI | `--service openai` | `OPENAI_API_KEY` | ★★★★ |
-| Ollama (local) | `--service ollama` | No | ★★★ |
+| Google  | `--service google` | none (free) | ★★★ |
+| OpenAI  | `--service openai` | `OPENAI_API_KEY` | ★★★★ |
+| DeepL   | `--service deepl`  | `DEEPL_AUTH_KEY` | ★★★★ |
+| Ollama  | `--service ollama` | none (local) | ★★★ |
 
-## How It Works / 工作原理 / 仕組み
-
-1. Extract text spans and their exact coordinates from the PDF
-2. Call the translation API to translate each text span
-3. Replace original text at the same position with translated version
-4. All vector graphics, lines, images, and decorative elements are preserved
-
-PDFのテキストスパンと正確な座標を抽出 → 翻訳APIを呼び出して翻訳 → 同じ位置に翻訳テキストを配置 → ベクトルグラフィック・線・画像はそのまま保持
-
-## Translating text baked into charts/images / 翻译图表位图文字
-
-Chart titles, axis labels, and legends are often rasterized into the figure
-bitmap (no text layer), so the normal pipeline can't reach them. Pass
-`--translate-images` to also translate that text via OCR + redraw:
+Set your OpenAI key once (zsh):
 
 ```bash
-python pdf-translate.py input.pdf -li zh -lo en --service openai --translate-images
+echo 'export OPENAI_API_KEY="sk-..."' >> ~/.zshrc && source ~/.zshrc
 ```
 
-Requirements: `--service openai` (uses GPT-4o vision) and `pip install easyocr`.
-Works **both directions** — CJK↔English (zh/ja/ko ↔ en); source and target must
-differ in script. It detects text regions with EasyOCR, transcribes+translates
-each with the vision model, erases the original pixels, and redraws the
-translation (color/size matched, CJK-capable font when the target is Chinese/
-Japanese/Korean), preserving the image's transparency. Cost: an OCR model load
-plus one vision call per detected label.
+---
 
-## Known Limitations / 已知限制 / 既知の制限
+## Translating text inside charts / figures
 
-- Scanned PDFs (pure image-based) are not supported — use OCR first
-- Machine translation may need manual review for domain-specific terminology
-- Large files (>50 pages) may take longer
-- `--translate-images` covers CJK↔English; redrawn font is a system default
-  (not the chart's original font), and very dense legends may clip slightly
+Chart titles, axis labels, and legends are often **not real text** — they're
+baked into a bitmap or drawn as vector outlines, so the normal pipeline can't
+reach them. Add `--translate-images`:
+
+```bash
+./translate ~/Downloads/report.pdf -li zh -lo en --service openai --translate-images
+```
+
+It detects text in figures (EasyOCR), translates it (GPT-4o vision), and redraws
+it in place — handling **bitmap charts, vector-drawn labels, and rotated /
+landscape tables**, in both directions (CJK ↔ English).
+
+Requires `--service openai` and a one-time `pip install easyocr` (into the
+project venv: `.venv/bin/pip install easyocr`). It adds an OCR pass plus a few
+vision calls per figure, so it's slower than text-only translation.
+
+---
+
+## First-time setup
+
+Already set up in this folder (`.venv/` exists). To recreate it elsewhere:
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+# optional, for --translate-images:
+.venv/bin/pip install easyocr
+```
+
+Requires Python 3.10–3.12 (pdf2zh is not compatible with 3.13).
+
+---
+
+## Known limitations
+
+- Scanned PDFs (pure images, no text layer) need OCR first — not handled here.
+- Machine translation may need manual review for domain terminology.
+- `--translate-images`: redrawn font is a system default (not the chart's
+  original), very dense legends may clip slightly, and it's slower/costs vision
+  calls. After a run, any text that still couldn't be translated is flagged in
+  the terminal with page numbers.
 
 ## License
 
-MIT - Copyright (c) 2026 [银桑](https://github.com/yinsang0910-star)
+MIT — Copyright (c) 2026 [银桑](https://github.com/yinsang0910-star)

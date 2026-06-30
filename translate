@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# One-line PDF translator. Auto-uses this project's bundled virtualenv, so you
+# don't need to activate anything. Run from anywhere:
+#
+#   /path/to/pdf-translate-skill/translate input.pdf -li en -lo zh --service openai
+#
+# Or add it to your PATH (see README) and just:  translate input.pdf ...
+#
+# All arguments are passed straight through to pdf-translate.py.
+set -euo pipefail
+
+# Resolve the real directory of this script (following symlinks), so the wrapper
+# works whether called directly, via PATH, or through a symlink.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+PY="$DIR/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "❌ Bundled virtualenv not found at $DIR/.venv" >&2
+  echo "   Set it up once with:" >&2
+  echo "     python3.11 -m venv \"$DIR/.venv\" && \"$DIR/.venv/bin/pip\" install -r \"$DIR/requirements.txt\"" >&2
+  exit 1
+fi
+
+exec "$PY" "$DIR/pdf-translate.py" "$@"
